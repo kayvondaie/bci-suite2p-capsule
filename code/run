@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -e
+
+# Entry point for Reproducible Runs of this capsule.
+#
+# Attach one or more raw assets (single-plane-ophys_<subject>_<date>_<time>)
+# and run. Optional env vars:
+#   EPOCH_MAP   tiff_stem:save_folder pairs, first = ROI-detection epoch
+#               (default spont:spont_pre,spont_slm:photostim_single,
+#                spontpost_slm:photostim_single2,spontpost:spont_post)
+#   RAW_ASSETS  comma-separated raw asset names (default: all attached)
+#
+# Outputs land in /results/<subject>_<date>/.
+
+python -u /code/run_suite2p_session.py

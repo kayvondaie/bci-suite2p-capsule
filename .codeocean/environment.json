@@ -1,0 +1,25 @@
+{
+	"version": 1,
+	"base_image": "codeocean/jupyterlab:3.4.4-miniconda4.12.0-python3.9-ubuntu20.04",
+	"options": {
+		"registry_host_arg": true,
+		"git_ask_pass": true
+	},
+	"installers": {
+		"pip": {
+			"packages": [
+				{"name": "h5py", "version": "3.11.0"},
+				{"name": "matplotlib", "version": "3.9.4"},
+				{"name": "numpy", "version": "1.26.4"},
+				{"name": "opencv-python-headless", "version": "4.10.0.84"},
+				{"name": "pandas", "version": "2.2.3"},
+				{"name": "scanimage-tiff-reader", "version": "1.4.1.4"},
+				{"name": "scipy", "version": "1.13.1"},
+				{"name": "suite2p", "version": "0.14.4"},
+				{"name": "tifffile", "version": "2024.8.30"}
+			],
+			"options": {},
+			"pre_install_options": {}
+		}
+	}
+}
