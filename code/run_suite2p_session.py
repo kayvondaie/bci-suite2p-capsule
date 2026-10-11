@@ -23,6 +23,7 @@ Environment variables:
 Outputs, per session, in /results/<subject>_<date>/:
     data_photostim<subject>_<date>.h5, data_photostim2<subject>_<date>.h5
     data_main_<subject>_<date>_BCI.h5   (spont traces etc., if any)
+    photostim_compact.h5, photostim2_compact.h5   (stimDist, favg_raw, seq)
     suite2p_<folder>/plane0/{F,Fneu,stat,iscell,ops,siHeader}.npy
 """
 
@@ -35,6 +36,7 @@ import traceback
 from collections import defaultdict
 from pathlib import Path
 
+import h5py
 import numpy as np
 
 sys.path.insert(0, "/code")
@@ -168,6 +170,17 @@ def process_session(raw):
     for h5 in work.glob("data_*.h5"):
         shutil.copy(h5, out / h5.name)
         print(f"Wrote {out / h5.name}")
+    # Compact per-epoch files with just what connectivity analyses need
+    # (same root-level keys ddct.load_hdf5 reads from data_photostim*.h5).
+    for pkey in ("photostim", "photostim2"):
+        if pkey not in data:
+            continue
+        compact = out / f"{pkey}_compact.h5"
+        with h5py.File(compact, "w") as f:
+            for key in ("stimDist", "favg_raw", "seq"):
+                if key in data[pkey]:
+                    f.create_dataset(key, data=np.asarray(data[pkey][key]))
+        print(f"Wrote {compact}")
     for s2p in work.glob("suite2p_*"):
         dst = out / s2p.name / "plane0"
         dst.mkdir(parents=True, exist_ok=True)
