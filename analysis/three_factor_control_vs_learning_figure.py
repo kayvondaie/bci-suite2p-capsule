@@ -50,7 +50,8 @@ def session_logp(sessions):
     return -np.log10(np.clip(p, 1e-300, 1.0)), p
 
 
-for lv, lv_label in [('learning', 'Learning'), ('learning_pseudo', 'Learning (pseudo)')]:
+for lv, lv_label, title in [('learning', 'Learning', ''),
+                            ('learning_pseudo', 'Learning', 'BCI activity as 10 s pseudo-trials')]:
     ctrl = [r for r in res if r['condition'] == 'control']
     lrn = [r for r in res if r['condition'] == lv]
 
@@ -79,6 +80,8 @@ for lv, lv_label in [('learning', 'Learning'), ('learning_pseudo', 'Learning (ps
             ha='right', va='bottom')
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
+    if title:
+        fig.suptitle(title, y=0.995, fontsize=7)
 
     # --- Panel B: per-session -log10(p) ---
     ax = axes[1]
