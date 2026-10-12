@@ -7,6 +7,10 @@
 #   learning: pre-epoch (-10..0 s before trial start) activity from trial F
 #   control : no trials; spont_pre + spont_post (dF/F) cut into consecutive
 #             10 s pseudo-trials, each standing in for one trial's pre epoch
+#   learning_pseudo: learning sessions run through the control procedure
+#             (continuous BCI-epoch df_closedloop cut into 10 s pseudo-trials),
+#             so control vs learning can be compared with identical activity
+#             preprocessing
 # Everything downstream (baseline, sliding windows, design matrix, CV fit) is
 # identical. Pair selection / E->E restriction / putative-SST exclusion match
 # connectivity_change_control_vs_learning.py. Test r compared learning vs
@@ -92,6 +96,10 @@ MIN_GROUPS = 10
 
 N_PERM = 10000
 
+# Learning sessions with blown-up dW (median |dW| and W0 regression far
+# outside every other session); excluded.
+EXCLUDE = {('BCI88', '013125'), ('BCI107', '013125')}
+
 #%% ============================================================================
 # CELL 3: Loading
 # ============================================================================
@@ -107,6 +115,14 @@ def learning_folder(mouse, session):
     raise FileNotFoundError(f'{mouse} {session}')
 
 
+def bin_pseudo_trials(dff, fs):
+    """Mean dF/F in consecutive PRE_EPOCH_SEC bins (cells x n_bins)."""
+    bin_len = int(round(PRE_EPOCH_SEC * fs))
+    n_bins = dff.shape[1] // bin_len
+    dff = dff[:, :n_bins * bin_len].reshape(dff.shape[0], n_bins, bin_len)
+    return np.nanmean(dff, axis=2)
+
+
 def load_session(mouse, session, condition):
     """AMP, stimDist and per-(pseudo)trial pre-epoch activity (cells x trials)."""
     if condition == 'control':
@@ -120,18 +136,21 @@ def load_session(mouse, session, condition):
         sh = np.load(folder + 'suite2p_photostim_single/plane0/siHeader.npy',
                      allow_pickle=True).item()
         fs = float(sh['metadata']['hRoiManager']['scanFrameRate'])
-        bin_len = int(round(PRE_EPOCH_SEC * fs))
         bins = []
         with h5py.File(glob.glob(folder + 'data_main_*.h5')[0], 'r') as f:
             for k in ['spont_pre', 'spont_post']:
                 Fs = np.asarray(f[k][:], dtype=float)
                 F0 = np.nanpercentile(Fs, 10, axis=1, keepdims=True)
                 F0[F0 <= 0] = np.nan
-                dff = (Fs - F0) / F0
-                n_bins = dff.shape[1] // bin_len
-                dff = dff[:, :n_bins * bin_len].reshape(dff.shape[0], n_bins, bin_len)
-                bins.append(np.nanmean(dff, axis=2))
+                bins.append(bin_pseudo_trials((Fs - F0) / F0, fs))
         epoch_act = np.nan_to_num(np.concatenate(bins, axis=1), nan=0.0)
+    elif condition == 'learning_pseudo':
+        folder = learning_folder(mouse, session)
+        data = ddct.load_hdf5(folder, ['df_closedloop', 'dt_si'], ['stimDist', 'favg_raw'])
+        AMP, stimDist = compute_amp_from_photostim(mouse, data, folder)
+        epoch_act = np.nan_to_num(
+            bin_pseudo_trials(np.asarray(data['df_closedloop'], dtype=float),
+                              1.0 / float(data['dt_si'])), nan=0.0)
     else:
         folder = learning_folder(mouse, session)
         data = ddct.load_hdf5(folder, ['F', 'dt_si'], ['stimDist', 'favg_raw'])
@@ -240,8 +259,11 @@ def session_fit(mouse, session, condition):
 
 all_results = []
 for condition, sessions in [('control', CONTROL_SESSIONS),
-                            ('learning', LEARNING_SESSIONS)]:
+                            ('learning', LEARNING_SESSIONS),
+                            ('learning_pseudo', LEARNING_SESSIONS)]:
     for mouse, session in sessions:
+        if (mouse, session) in EXCLUDE:
+            continue
         print(f"\n--- {condition}: {mouse} {session} ---")
         try:
             r = session_fit(mouse, session, condition)
@@ -296,36 +318,41 @@ def one_sample_p(v):
         return np.nan
 
 
+LEARNING_VARIANTS = {'learning': 'Learning (BCI trials)',
+                     'learning_pseudo': 'Learning (BCI pseudo-trials)'}
 stats = {}
-for mg, mice in MOUSE_GROUPS.items():
-    ctrl = [r for r in qc_all if r['condition'] == 'control' and r['mouse'] in mice]
-    lrn = [r for r in qc_all if r['condition'] == 'learning' and r['mouse'] in mice]
-    mice_both = sorted({r['mouse'] for r in ctrl} & {r['mouse'] for r in lrn})
-    diff, p = within_mouse_permutation(ctrl, lrn, 'r_test', mice_both)
-    stats[mg] = {'ctrl': ctrl, 'lrn': lrn, 'mice_both': mice_both, 'p': p}
-    rc = np.array([r['r_test'] for r in ctrl])
-    rl = np.array([r['r_test'] for r in lrn])
-    print(f"\n=== {mg} {mice_both}: {len(ctrl)} control / {len(lrn)} learning sessions ===")
-    print(f"  test r  control  median {np.median(rc):+.4f}, >0 in {np.sum(rc > 0)}/{len(rc)}, "
-          f"sig {np.sum([r['p_test'] < 0.05 for r in ctrl])}/{len(rc)}, "
-          f"Wilcoxon vs 0 p={one_sample_p(rc):.3f}")
-    print(f"  test r  learning median {np.median(rl):+.4f}, >0 in {np.sum(rl > 0)}/{len(rl)}, "
-          f"sig {np.sum([r['p_test'] < 0.05 for r in lrn])}/{len(rl)}, "
-          f"Wilcoxon vs 0 p={one_sample_p(rl):.3f}")
-    print(f"  learning - control (within mouse) {diff:+.4f}, perm p={p:.3f}")
-    print('  per mouse (ctrl / learn): ' + ', '.join(
-        f"{m} {np.mean([r['r_test'] for r in ctrl if r['mouse'] == m]):+.4f}/"
-        f"{np.mean([r['r_test'] for r in lrn if r['mouse'] == m]):+.4f}"
-        for m in mice_both))
+for lv in LEARNING_VARIANTS:
+    for mg, mice in MOUSE_GROUPS.items():
+        ctrl = [r for r in qc_all if r['condition'] == 'control' and r['mouse'] in mice]
+        lrn = [r for r in qc_all if r['condition'] == lv and r['mouse'] in mice]
+        mice_both = sorted({r['mouse'] for r in ctrl} & {r['mouse'] for r in lrn})
+        diff, p = within_mouse_permutation(ctrl, lrn, 'r_test', mice_both)
+        stats[lv, mg] = {'ctrl': ctrl, 'lrn': lrn, 'mice_both': mice_both, 'p': p}
+        rc = np.array([r['r_test'] for r in ctrl])
+        rl = np.array([r['r_test'] for r in lrn])
+        print(f"\n=== control vs {lv} | {mg} {mice_both}: "
+              f"{len(ctrl)} / {len(lrn)} sessions ===")
+        print(f"  test r  control  median {np.median(rc):+.4f}, >0 in {np.sum(rc > 0)}/{len(rc)}, "
+              f"sig {np.sum([r['p_test'] < 0.05 for r in ctrl])}/{len(rc)}, "
+              f"Wilcoxon vs 0 p={one_sample_p(rc):.3f}")
+        print(f"  test r  {lv} median {np.median(rl):+.4f}, >0 in {np.sum(rl > 0)}/{len(rl)}, "
+              f"sig {np.sum([r['p_test'] < 0.05 for r in lrn])}/{len(rl)}, "
+              f"Wilcoxon vs 0 p={one_sample_p(rl):.3f}")
+        print(f"  {lv} - control (within mouse) {diff:+.4f}, perm p={p:.3f}")
+        print('  per mouse (ctrl / learn): ' + ', '.join(
+            f"{m} {np.mean([r['r_test'] for r in ctrl if r['mouse'] == m]):+.4f}/"
+            f"{np.mean([r['r_test'] for r in lrn if r['mouse'] == m]):+.4f}"
+            for m in mice_both))
 
 #%% ============================================================================
 # CELL 7: Figure — test r per session, control vs learning
 # ============================================================================
 mouse_list = sorted({r['mouse'] for r in qc_all})
 mouse_colors = {m: plt.cm.tab10(i % 10) for i, m in enumerate(mouse_list)}
-fig, axes = plt.subplots(1, 3, figsize=(15, 5), sharey=True)
-for ax, mg in zip(axes, MOUSE_GROUPS):
-    S = stats[mg]
+fig, axes = plt.subplots(2, 3, figsize=(15, 10), sharey=True)
+for ax, (lv, mg) in zip(axes.flat, [(lv, mg) for lv in LEARNING_VARIANTS
+                                    for mg in MOUSE_GROUPS]):
+    S = stats[lv, mg]
     rng = np.random.default_rng(0)
     for xi, group in [(0, S['ctrl']), (1, S['lrn'])]:
         for r in group:
@@ -338,10 +365,12 @@ for ax, mg in zip(axes, MOUSE_GROUPS):
         ax.plot([0, 1], [vc, vl], '-', color=mouse_colors[m], linewidth=2)
     ax.axhline(0, color='k', alpha=0.3)
     ax.set_xticks([0, 1])
-    ax.set_xticklabels(['Control\n(spont pseudo-trials)', 'Learning\n(BCI trials)'])
+    ax.set_xticklabels(['Control\n(spont pseudo-trials)',
+                        LEARNING_VARIANTS[lv].replace(' (', '\n(')])
     ax.set_xlim(-0.5, 1.5)
     ax.set_title(f'{mg}\nwithin-mouse p={S["p"]:.3f}')
-axes[0].set_ylabel('Test r (5-fold CV), dW ~ CC_windows')
+for ax in axes[:, 0]:
+    ax.set_ylabel('Test r (5-fold CV), dW ~ CC_windows')
 handles = [plt.Line2D([], [], marker='o', ls='', color=mouse_colors[m], label=m)
            for m in mouse_list]
 fig.legend(handles=handles, loc='lower center', ncol=len(mouse_list),
