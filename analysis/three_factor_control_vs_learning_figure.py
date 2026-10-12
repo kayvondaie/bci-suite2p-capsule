@@ -3,9 +3,11 @@
 # ============================================================================
 # Same layout and conventions as CELL 9 of three_factor_variance_explained_figure.py:
 #   a: pooled out-of-fold predictions vs actual dW, pf.mean_bin_plot, 5 bins,
-#      SEM error bars. Learning black, control gray. Predictions are z-scored
-#      within each session before pooling (pooled z-scoring is dominated by the
-#      few sessions with the widest prediction range).
+#      SEM error bars. Learning black, control gray. Predictions are converted
+#      to rank-based normal scores within each session before pooling: control
+#      predictions are heavy-tailed (a few pairs get large predictions), so a
+#      plain z-score compresses most pairs toward 0. Rank scores put every
+#      session on the same quantile axis, consistent with the Spearman p in b.
 #   b: per-session -log10(p), Spearman over concatenated out-of-fold predictions.
 # Reads three_factor_control_vs_learning.npy (three_factor_control_vs_learning.py).
 import sys, os
@@ -15,7 +17,7 @@ if _THIS_DIR not in sys.path or sys.path[0] != _THIS_DIR:
 
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.stats import pearsonr, spearmanr
+from scipy.stats import norm, pearsonr, rankdata, spearmanr
 import plotting_functions as pf
 
 RESULTS_DIR = '/root/capsule/results'
@@ -38,9 +40,9 @@ res = np.load(os.path.join(RESULTS_DIR, 'three_factor_control_vs_learning.npy'),
 res = [r for r in res if r['n_groups'] >= MIN_GROUPS]
 
 
-def zscore(x):
-    s = np.std(x)
-    return (x - np.mean(x)) / s if s > 0 else x * 0
+def rank_z(x):
+    """Rank-based normal scores: rank -> standard-normal quantile."""
+    return norm.ppf((rankdata(x) - 0.5) / len(x))
 
 
 def session_logp(sessions):
@@ -64,7 +66,7 @@ for lv, lv_label in [('learning', 'Learning'), ('learning_pseudo', 'Learning (ps
     plt.sca(ax)
     pooled_r = {}
     for group, color, name in [(ctrl, '0.5', 'control'), (lrn, 'k', lv)]:
-        Yp = np.concatenate([zscore(r['Y_pred_all']) for r in group])
+        Yp = np.concatenate([rank_z(r['Y_pred_all']) for r in group])
         Yt = np.concatenate([r['Y_test_all'] for r in group])
         pf.mean_bin_plot(Yp, Yt, col=5, color=color)
         pooled_r[name] = pearsonr(Yp, Yt)[0]
