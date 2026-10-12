@@ -73,10 +73,10 @@ for lv, lv_label in [('learning', 'Learning'), ('learning_pseudo', 'Learning (ps
     ax.axhline(0, color='k', ls='-', alpha=0.2, linewidth=0.5)
     ax.set_xlabel('Predicted $\\Delta W$ (z)')
     ax.set_ylabel('Actual $\\Delta W$ (z)')
-    ax.text(0.03, 0.97, lv_label, color='k', transform=ax.transAxes,
-            ha='left', va='top')
-    ax.text(0.03, 0.85, 'Control', color='0.5', transform=ax.transAxes,
-            ha='left', va='top')
+    ax.text(0.98, 0.15, lv_label, color='k', transform=ax.transAxes,
+            ha='right', va='bottom')
+    ax.text(0.98, 0.03, 'Control', color='0.5', transform=ax.transAxes,
+            ha='right', va='bottom')
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
 
