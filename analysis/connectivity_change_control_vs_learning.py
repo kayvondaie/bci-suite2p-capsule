@@ -4,9 +4,11 @@
 # Compare photostim connectivity change (after - before) between
 #   - control sessions: photostim -> spont -> water in bowl (no BCI) -> spont -> photostim
 #   - learning sessions: photostim -> BCI -> photostim
-# Pan-neuronal mice only (ai230 x slc17a7 riboGCaMP8s: BCI88, BCI93, BCI107),
-# restricted to E->E pairs: putative SST (outlier) cells are excluded both as
-# stimulated targets and as postsynaptic cells.
+# Two mouse groups, E->E pairs only:
+#   pan-neuronal (ai230 x slc17a7 riboGCaMP8s: BCI88, BCI93, BCI107): putative
+#     SST (outlier) cells are excluded both as stimulated targets and as
+#     postsynaptic cells.
+#   E-only (BCI103, BCI105): all cells are E, no exclusion.
 # Connectivity, pair selection and dW are otherwise computed exactly as in
 # sliding_window_temporal_offset.py (compute_amp_from_photostim, targets
 # <10 um with AMP>0.1 in both epochs, non-targets 30-1000 um).
@@ -69,15 +71,21 @@ print("Setup complete!")
 # CELL 2: Session lists
 # ============================================================================
 # (mouse, session, FOV) from 'Surgeries and experiments - BCI.xlsx'.
+PAN_NEURONAL_MICE = ['BCI88', 'BCI93', 'BCI107']
+E_ONLY_MICE = ['BCI103', 'BCI105']
+
 CONTROL_SESSIONS = [
     ('BCI88',  '012725', 'FOV_04'),
     ('BCI93',  '012825', 'FOV_05'),
     ('BCI93',  '022125', 'FOV_07'),
     ('BCI107', '021925', 'FOV_03'),
+    ('BCI103', '013025', 'FOV_01'),
+    ('BCI103', '021925', 'FOV_03'),
+    ('BCI105', '013025', 'FOV_01'),
 ]
 
 # 'BCI + photostim before-after' sessions from the same mice
-# (BCI_ai230_slc17a7_riboGcamp8s asset).
+# (BCI_ai230_slc17a7_riboGcamp8s and BCI_three_factor_2025 assets).
 LEARNING_SESSIONS = [
     ('BCI88',  '011025', 'FOV_04'), ('BCI88',  '011325', 'FOV_04'),
     ('BCI88',  '012425', 'FOV_04'), ('BCI88',  '012825', 'FOV_04'),
@@ -87,6 +95,17 @@ LEARNING_SESSIONS = [
     ('BCI93',  '020325', 'FOV_06'), ('BCI93',  '020425', 'FOV_06'),
     ('BCI107', '013025', 'FOV_01'), ('BCI107', '013125', 'FOV_01'),
     ('BCI107', '020325', 'FOV_02'), ('BCI107', '020625', 'FOV_01'),
+    ('BCI103', '012125', 'FOV_01'), ('BCI103', '012225', 'FOV_01'),
+    ('BCI103', '012325', 'FOV_01'), ('BCI103', '012425', 'FOV_01'),
+    ('BCI103', '012725', 'FOV_01'), ('BCI103', '012825', 'FOV_01'),
+    ('BCI103', '012925', 'FOV_01'),
+    ('BCI103', '020325', 'FOV_02'), ('BCI103', '020425', 'FOV_02'),
+    ('BCI103', '020525', 'FOV_02'), ('BCI103', '020625', 'FOV_02'),
+    ('BCI105', '012125', 'FOV_01'), ('BCI105', '012225', 'FOV_01'),
+    ('BCI105', '012325', 'FOV_01'), ('BCI105', '012425', 'FOV_01'),
+    ('BCI105', '012725', 'FOV_01'), ('BCI105', '012925', 'FOV_01'),
+    ('BCI105', '013125', 'FOV_01'),
+    ('BCI105', '020325', 'FOV_02'), ('BCI105', '020425', 'FOV_02'),
 ]
 
 # Pair selection (same as sliding_window_temporal_offset.py)
@@ -102,10 +121,17 @@ DIST_BINS = np.array([30, 60, 100, 200, 400, 1000])
 # excluded from stats/figures.
 MIN_GROUPS = 10
 
-# Putative SST (outlier) cells: mean non-target amp > mean + N SD. Excluded as
-# targets and as postsynaptic cells, leaving E->E pairs.
+# Putative SST (outlier) cells in pan-neuronal mice: mean non-target amp >
+# mean + N SD. Excluded as targets and as postsynaptic cells.
 N_SD_OUTLIER = 2
 CELL_GROUPS = ['E']
+
+# Mouse groups reported separately and together
+MOUSE_GROUPS = {
+    'pan-neuronal': PAN_NEURONAL_MICE,
+    'E-only': E_ONLY_MICE,
+    'combined': PAN_NEURONAL_MICE + E_ONLY_MICE,
+}
 
 # Within-mouse label permutations for the learning-vs-control test
 N_PERM = 10000
@@ -156,6 +182,8 @@ def session_connectivity_change(mouse, session, condition):
     outlier_threshold = (np.nanmean(mean_amp_nontarg) +
                          N_SD_OUTLIER * np.nanstd(mean_amp_nontarg))
     is_outlier = mean_amp_nontarg > outlier_threshold
+    if mouse not in PAN_NEURONAL_MICE:
+        is_outlier = np.zeros_like(is_outlier)   # E-only: every cell is E
     cell_masks = {'E': ~is_outlier & np.isfinite(mean_amp_nontarg)}
 
     dw_list, amp0_list, amp1_list, dist_list, nt_list = [], [], [], [], []
@@ -255,8 +283,7 @@ for condition, sessions in [('control', CONTROL_SESSIONS),
             traceback.print_exc()
 
 for condition in ['control', 'learning']:
-    n = sum(r['condition'] == condition and r['cell_group'] == 'all'
-            for r in all_results)
+    n = sum(r['condition'] == condition for r in all_results)
     print(f"{condition}: {n} sessions")
 
 #%% ============================================================================
@@ -316,14 +343,14 @@ def within_mouse_permutation(ctrl, lrn, key, mice, n_perm=N_PERM, seed=0):
 
 
 stats = {}
-for cg in CELL_GROUPS:
-    qc = [r for r in qc_all if r['cell_group'] == cg]
+for cg in MOUSE_GROUPS:
+    qc = [r for r in qc_all if r['mouse'] in MOUSE_GROUPS[cg]]
     ctrl = [r for r in qc if r['condition'] == 'control']
     lrn = [r for r in qc if r['condition'] == 'learning']
     mice_both = sorted({r['mouse'] for r in ctrl} & {r['mouse'] for r in lrn})
     n_cells_c = np.median([r['n_cells'] for r in ctrl]) if ctrl else np.nan
     n_cells_l = np.median([r['n_cells'] for r in lrn]) if lrn else np.nan
-    print(f"\n=== Postsynaptic cells: {cg} (median {n_cells_c:.0f} control / "
+    print(f"\n=== Mice: {cg} {MOUSE_GROUPS[cg]}, E->E pairs (median {n_cells_c:.0f} control / "
           f"{n_cells_l:.0f} learning cells per session) ===")
     stats[cg] = {'ctrl': ctrl, 'lrn': lrn, 'mice_both': mice_both}
     for key, label in METRICS:
@@ -347,7 +374,7 @@ for cg in CELL_GROUPS:
 mouse_list = sorted({r['mouse'] for r in qc_all})
 mouse_colors = {m: plt.cm.tab10(i % 10) for i, m in enumerate(mouse_list)}
 
-for cg in CELL_GROUPS:
+for cg in MOUSE_GROUPS:
     S = stats[cg]
     ctrl, lrn, mice_both = S['ctrl'], S['lrn'], S['mice_both']
     fig, axes = plt.subplots(2, 3, figsize=(15, 9))
@@ -389,11 +416,11 @@ for cg in CELL_GROUPS:
                for m in mouse_list]
     fig.legend(handles=handles, loc='lower center', ncol=len(mouse_list),
                bbox_to_anchor=(0.5, -0.03))
-    fig.suptitle('E->E photostim connectivity change, pan-neuronal mice: '
+    fig.suptitle(f'E->E photostim connectivity change, {cg} mice: '
                  'water control vs BCI learning', fontweight='bold')
     plt.tight_layout()
     plt.savefig(os.path.join(RESULTS_DIR,
-                             f'fig_connectivity_change_control_vs_learning_{cg}.png'),
+                             f'fig_connectivity_change_control_vs_learning_E_{cg}.png'),
                 dpi=150, bbox_inches='tight')
     plt.show()
     plt.close(fig)
