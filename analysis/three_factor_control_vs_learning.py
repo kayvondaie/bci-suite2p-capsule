@@ -234,6 +234,7 @@ def session_fit(mouse, session, condition):
     # ---- Cross-validated pinv fit ----
     cv = KFold(n_splits=n_cv_folds, shuffle=True, random_state=42)
     r_te_f, r_tr_f, p_te_f = [], [], []
+    Y_test_all, Y_pred_all = [], []
     for train_idx, test_idx in cv.split(X):
         Y_tr, Y_te = Y[train_idx], Y[test_idx]
         mu_y, sig_y = Y_tr.mean(), Y_tr.std()
@@ -249,11 +250,15 @@ def session_fit(mouse, session, condition):
             r, p = 0.0, 1.0
         r_te_f.append(r)
         p_te_f.append(p)
+        Y_test_all.append((Y_te - mu_y) / sig_y)
+        Y_pred_all.append(pred_te)
     return {
         'mouse': mouse, 'session': session, 'condition': condition,
         'n_groups': n_groups, 'n_pairs': n_pairs, 'n_trials': trl, 'n_windows': n_wins,
         'r_test': np.mean(r_te_f), 'r_train': np.mean(r_tr_f),
         'p_test': np.exp(np.mean(np.log(np.clip(p_te_f, 1e-300, 1.0)))),
+        'Y_test_all': np.concatenate(Y_test_all),
+        'Y_pred_all': np.concatenate(Y_pred_all),
     }
 
 
@@ -382,3 +387,101 @@ plt.savefig(os.path.join(RESULTS_DIR, 'fig_three_factor_control_vs_learning.png'
             dpi=150, bbox_inches='tight')
 plt.close(fig)
 print("Figure saved.")
+
+#%% ============================================================================
+# CELL 8: Pooled comparison — all sessions per condition, no per-mouse pairing
+# ============================================================================
+# Pool every session's held-out (Y_pred, Y_test) pairs within a condition.
+#   pooled r      : Pearson r over all pooled pairs
+#   p (difference): shuffle condition labels across sessions (ignoring mouse),
+#                   recompute pooled r_learning - r_control
+#   binned curve  : predicted-dW percentile bins, 95% CI from bootstrapping
+#                   sessions within each condition
+N_POOL_PERM = 5000
+N_POOL_BOOT = 1000
+N_POOL_BINS = 5
+
+
+def session_sums(r):
+    x, y = r['Y_pred_all'], r['Y_test_all']
+    return np.array([len(x), x.sum(), y.sum(), (x * y).sum(), (x * x).sum(), (y * y).sum()])
+
+
+def pooled_r(sums):
+    n, sx, sy, sxy, sxx, syy = sums.sum(axis=0)
+    cov = sxy - sx * sy / n
+    return cov / np.sqrt((sxx - sx ** 2 / n) * (syy - sy ** 2 / n))
+
+
+def binned_curve(sessions):
+    x = np.concatenate([r['Y_pred_all'] for r in sessions])
+    y = np.concatenate([r['Y_test_all'] for r in sessions])
+    edges = np.percentile(x, np.linspace(0, 100, N_POOL_BINS + 1))
+    idx = np.clip(np.digitize(x, edges[1:-1]), 0, N_POOL_BINS - 1)
+    return (np.array([x[idx == b].mean() for b in range(N_POOL_BINS)]),
+            np.array([y[idx == b].mean() for b in range(N_POOL_BINS)]))
+
+
+pooled = {}
+for lv in LEARNING_VARIANTS:
+    ctrl = [r for r in qc_all if r['condition'] == 'control']
+    lrn = [r for r in qc_all if r['condition'] == lv]
+    S_c = np.array([session_sums(r) for r in ctrl])
+    S_l = np.array([session_sums(r) for r in lrn])
+    r_c, r_l = pooled_r(S_c), pooled_r(S_l)
+    obs = r_l - r_c
+
+    S_all = np.vstack([S_c, S_l])
+    rng = np.random.default_rng(0)
+    null = np.empty(N_POOL_PERM)
+    for i in range(N_POOL_PERM):
+        perm = rng.permutation(len(S_all))
+        null[i] = pooled_r(S_all[perm[len(S_c):]]) - pooled_r(S_all[perm[:len(S_c)]])
+    p_diff = (np.sum(np.abs(null) >= abs(obs)) + 1) / (N_POOL_PERM + 1)
+
+    # Bootstrap sessions within each condition for pooled-r and curve CIs
+    boot = {}
+    for name, group, S in [('control', ctrl, S_c), (lv, lrn, S_l)]:
+        rs, xs, ys = [], [], []
+        for _ in range(N_POOL_BOOT):
+            pick = rng.integers(0, len(group), len(group))
+            rs.append(pooled_r(S[pick]))
+            bx, by = binned_curve([group[k] for k in pick])
+            xs.append(bx)
+            ys.append(by)
+        boot[name] = dict(r_ci=np.percentile(rs, [2.5, 97.5]),
+                          x=np.median(xs, axis=0), y=np.median(ys, axis=0),
+                          y_lo=np.percentile(ys, 2.5, axis=0),
+                          y_hi=np.percentile(ys, 97.5, axis=0))
+    pooled[lv] = dict(r_c=r_c, r_l=r_l, p=p_diff, boot=boot,
+                      n_c=(len(ctrl), int(S_c[:, 0].sum())),
+                      n_l=(len(lrn), int(S_l[:, 0].sum())))
+    print(f"\n=== POOLED control vs {lv} ===")
+    print(f"  control : {len(ctrl)} sessions, {int(S_c[:, 0].sum())} pairs, pooled r = "
+          f"{r_c:+.4f} (95% CI {boot['control']['r_ci'][0]:+.4f} to {boot['control']['r_ci'][1]:+.4f})")
+    print(f"  {lv:8s}: {len(lrn)} sessions, {int(S_l[:, 0].sum())} pairs, pooled r = "
+          f"{r_l:+.4f} (95% CI {boot[lv]['r_ci'][0]:+.4f} to {boot[lv]['r_ci'][1]:+.4f})")
+    print(f"  difference {obs:+.4f}, session-label permutation p = {p_diff:.4f}")
+
+fig, axes = plt.subplots(1, 2, figsize=(13, 5.5), sharey=True)
+for ax, lv in zip(axes, LEARNING_VARIANTS):
+    P = pooled[lv]
+    for name, color, label in [('control', '#3498db', f'Control (water), r={P["r_c"]:.3f}'),
+                               (lv, '#e74c3c', f'{LEARNING_VARIANTS[lv]}, r={P["r_l"]:.3f}')]:
+        b = P['boot'][name]
+        ax.errorbar(b['x'], b['y'], yerr=[b['y'] - b['y_lo'], b['y_hi'] - b['y']],
+                    fmt='o-', color=color, capsize=4, linewidth=2, markersize=7,
+                    label=label)
+    ax.axhline(0, color='k', ls='--', alpha=0.3)
+    ax.set_xlabel(r'Predicted $\Delta W$ (z, held out)')
+    ax.set_title(f'Pooled: control vs {LEARNING_VARIANTS[lv]}\n'
+                 f'difference p={P["p"]:.4f} (session-label permutation)')
+    ax.legend(fontsize=10)
+axes[0].set_ylabel(r'Actual $\Delta W$ (z)')
+fig.suptitle('3-factor MLR, E->E pairs, all mice pooled (95% CI: session bootstrap)',
+             fontweight='bold')
+plt.tight_layout()
+plt.savefig(os.path.join(RESULTS_DIR, 'fig_three_factor_pooled_control_vs_learning.png'),
+            dpi=150, bbox_inches='tight')
+plt.close(fig)
+print("Pooled figure saved.")
