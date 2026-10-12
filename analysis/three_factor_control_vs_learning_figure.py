@@ -2,8 +2,10 @@
 # Paper-style panel: 3-factor MLR, BCI learning vs water control (E->E pairs)
 # ============================================================================
 # Same layout and conventions as CELL 9 of three_factor_variance_explained_figure.py:
-#   a: pooled out-of-fold predictions (z-scored per condition) vs actual dW,
-#      pf.mean_bin_plot, 5 bins, SEM error bars. Learning black, control gray.
+#   a: pooled out-of-fold predictions vs actual dW, pf.mean_bin_plot, 5 bins,
+#      SEM error bars. Learning black, control gray. Predictions are z-scored
+#      within each session before pooling (pooled z-scoring is dominated by the
+#      few sessions with the widest prediction range).
 #   b: per-session -log10(p), Spearman over concatenated out-of-fold predictions.
 # Reads three_factor_control_vs_learning.npy (three_factor_control_vs_learning.py).
 import sys, os
@@ -53,18 +55,18 @@ for lv, lv_label in [('learning', 'Learning'), ('learning_pseudo', 'Learning (ps
     FIG_W = 3
     FIG_H = 1.5
     fig, axes = plt.subplots(1, 2, figsize=(FIG_W, FIG_H),
-                             gridspec_kw={'left': 0.10, 'right': 0.95,
-                                          'bottom': 0.20, 'top': 0.85,
-                                          'wspace': 0.40})
+                             gridspec_kw={'left': 0.17, 'right': 0.97,
+                                          'bottom': 0.27, 'top': 0.92,
+                                          'wspace': 0.55})
 
     # --- Panel A: pooled binned plots, z-scored predictions ---
     ax = axes[0]
     plt.sca(ax)
     pooled_r = {}
     for group, color, name in [(ctrl, '0.5', 'control'), (lrn, 'k', lv)]:
-        Yp = np.concatenate([r['Y_pred_all'] for r in group])
+        Yp = np.concatenate([zscore(r['Y_pred_all']) for r in group])
         Yt = np.concatenate([r['Y_test_all'] for r in group])
-        pf.mean_bin_plot(zscore(Yp), Yt, col=5, color=color)
+        pf.mean_bin_plot(Yp, Yt, col=5, color=color)
         pooled_r[name] = pearsonr(Yp, Yt)[0]
     ax.axhline(0, color='k', ls='-', alpha=0.2, linewidth=0.5)
     ax.set_xlabel('Predicted $\\Delta W$ (z)')
