@@ -12,7 +12,7 @@ responses, stimDist > 30 um):
        far_minus_near : mean(200-1000 um) - mean(30-100 um)
   2. suppression / excitation
        noise = robust SD (1.4826 * MAD) of the cell's responses to groups
-               > 400 um away
+               > 400 um away (spread only; responses are compared with 0)
        frac_sup / frac_exc : fraction of groups at 30-300 um with response
                < -2 noise / > +2 noise
 Features are z-scored within session. Comparison as in
@@ -75,7 +75,7 @@ def cell_features(A, D):
             noise = 1.4826 * np.median(np.abs(noise_ref - np.median(noise_ref)))
             test = a[d < 300]
             if noise > 0 and len(test) >= 5:
-                z = (test - np.median(noise_ref)) / noise
+                z = test / noise    # vs zero; far-field spread sets the scale only
                 f[i, 6] = np.mean(z < -2)
                 f[i, 7] = np.mean(z > 2)
     return f
