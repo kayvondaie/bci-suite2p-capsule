@@ -57,6 +57,7 @@ print("Setup complete!")
 def preprocess(F, fs):
     F = np.asarray(F, dtype=float)
     F = np.where(np.isfinite(F), F, np.nanmean(F, axis=1, keepdims=True))
+    F = np.nan_to_num(F, nan=0.0)          # all-NaN cells -> flat -> r = 0
     F = F - uniform_filter1d(F, size=max(3, int(DETREND_SEC * fs)), axis=1, mode='nearest')
     sd = F.std(axis=1, keepdims=True)
     sd[sd == 0] = 1
@@ -66,6 +67,7 @@ def preprocess(F, fs):
 def session_profiles(folder, mouse):
     data = ddct.load_hdf5(folder, ['df_closedloop', 'dt_si'], ['stimDist', 'favg_raw'])
     Z = preprocess(data['df_closedloop'], 1.0 / float(data['dt_si']))
+    live = Z.std(axis=1) > 0
     n = Z.shape[0]
     C = Z @ Z.T / Z.shape[1]
     np.fill_diagonal(C, np.nan)
@@ -76,6 +78,7 @@ def session_profiles(folder, mouse):
     pc1 = pc1 * np.sign(np.sum(pc1))
     feats = np.column_stack([off.mean(axis=1), off.std(axis=1), skew(off, axis=1),
                              np.percentile(off, 95, axis=1), pc1])
+    feats[~live] = np.nan                  # flat (dead) cells excluded from features
 
     out = np.zeros(n, dtype=bool)
     try:
