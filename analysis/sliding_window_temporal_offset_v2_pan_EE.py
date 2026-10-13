@@ -9,6 +9,10 @@ on the pan-neuronal mice (BCI88, BCI93, BCI107), with three pair selections:
                 (as in sliding_window_temporal_offset_v3_by_group.py)
   strict_EE   : outliers removed as stimulated targets AND postsynaptic cells,
                 outliers from the average of the before and after maps
+  strict_EE_broad : strict_EE, plus cells whose frac_exc (fraction of stim
+                groups at 30-300 um exciting the cell, photostim_response_profiles.py)
+                exceeds the E-only 99th percentile, removed as targets and
+                postsynaptic cells
 Outlier = mean non-target (>30 um) amp > mean + 2 SD across cells.
 Two dev2 coactivity flavours:
   dev2_lag                : pre(t) * (post(t) - epoch-specific baseline)
@@ -55,7 +59,33 @@ dist_nontarg_max = 1000
 amp0_thr = 0.1
 amp1_thr = 0.1
 
-SELECTIONS = ['all', 'rest', 'strict_EE']
+SELECTIONS = ['all', 'rest', 'strict_EE', 'strict_EE_broad']
+
+# E-only 99th percentile of frac_exc (from photostim_response_profiles.npy)
+_prof = np.load(os.path.join(RESULTS_DIR, 'photostim_response_profiles.npy'),
+                allow_pickle=True).tolist()
+_fe = np.array([c['raw'][7] for c in _prof if c['cohort'] == 'E-only'])
+FRAC_EXC_THR = np.nanpercentile(_fe, 99)
+print(f"frac_exc threshold (E-only 99th pct) = {FRAC_EXC_THR:.3f}")
+
+
+def frac_exc(A, D):
+    """Fraction of groups at 30-300 um exciting each cell (> 2 x far-field robust SD),
+    as in photostim_response_profiles.py."""
+    out = np.full(A.shape[0], np.nan)
+    for i in range(A.shape[0]):
+        a, d = A[i], D[i]
+        ok = np.isfinite(a) & np.isfinite(d) & (d > 30) & (d < 1000)
+        if ok.sum() < 10:
+            continue
+        a, d = a[ok], d[ok]
+        ref = a[d >= 400]
+        test = a[d < 300]
+        if len(ref) >= 5 and len(test) >= 5:
+            noise = 1.4826 * np.median(np.abs(ref - np.median(ref)))
+            if noise > 0:
+                out[i] = np.mean(test / noise > 2)
+    return out
 CC_MODES = ['dev2_lag', 'dev2_fulltrial_baseline']
 EPOCH_ORDER = ['pre', 'go_cue', 'late', 'reward']
 n_epochs = len(EPOCH_ORDER)
@@ -79,6 +109,11 @@ def build_pairs(AMP, stimDist, sel):
         out_targ = np.zeros_like(out_post)
     elif sel == 'strict_EE':
         out_post, finite = outlier_mask((AMP[0] + AMP[1]) / 2, stimDist)
+        out_targ = out_post
+    elif sel == 'strict_EE_broad':
+        out_post, finite = outlier_mask((AMP[0] + AMP[1]) / 2, stimDist)
+        fe = frac_exc((AMP[0] + AMP[1]) / 2, stimDist)
+        out_post = out_post | (fe > FRAC_EXC_THR)
         out_targ = out_post
     else:
         out_post = np.zeros(AMP[0].shape[0], dtype=bool)
