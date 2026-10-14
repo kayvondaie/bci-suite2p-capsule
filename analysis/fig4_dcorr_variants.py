@@ -224,6 +224,25 @@ def pooled_fit(sufs):
     return beta[0], se[0], 2 * sps.norm.sf(abs(beta[0] / se[0])), n
 
 
+def pooled_diff_p(sufs_c, sufs_l, col=0):
+    """Learning - control difference in one pooled model with condition-
+    specific coefficients and a common residual variance (equivalent to a
+    condition x regressor interaction); Wald p, no resampling."""
+    rss, n, k, var, b = 0.0, 0, 0, 0.0, []
+    for sufs in (sufs_c, sufs_l):
+        XtX = sum(s[0] for s in sufs)
+        Xty = sum(s[1] for s in sufs)
+        beta = np.linalg.solve(XtX, Xty)
+        rss += sum(s[2] for s in sufs) - beta @ Xty
+        n += sum(s[3] for s in sufs)
+        k += len(beta)
+        var += np.linalg.inv(XtX)[col, col]
+        b.append(beta[col])
+    s2 = rss / (n - k)
+    z = (b[1] - b[0]) / np.sqrt(s2 * var)
+    return b[1] - b[0], 2 * sps.norm.sf(abs(z))
+
+
 def pooled_fit_all(sufs):
     XtX = sum(s[0] for s in sufs)
     Xty = sum(s[1] for s in sufs)
@@ -265,6 +284,28 @@ for mg, mice in MOUSE_GROUPS.items():
             b, se, p = pooled_fit_all([r['joint'][v]['suff'] for r in ss])
             print(f"  {cond:8s} {v:14s} dC={b[0]:+.4f} (p={p[0]:.2g})  CdW={b[1]:+.4f} "
                   f"(p={p[1]:.2g})  target dW={b[2]:+.4f} (p={p[2]:.2g})  n={len(ss)}")
+    for v in VARIANTS:
+        sl = [r['joint'][v]['suff'] for r in qc if r['condition'] == 'learning'
+              and r['mouse'] in mice and v in r.get('joint', {})]
+        sc = [r['joint'][v]['suff'] for r in qc if r['condition'] == 'control'
+              and r['mouse'] in mice and v in r.get('joint', {})]
+        if sl and sc:
+            d0, p0 = pooled_diff_p(sc, sl, 0)
+            d1, p1 = pooled_diff_p(sc, sl, 1)
+            print(f"  learning - control {v:14s} dC diff={d0:+.4f} (p={p0:.2g})  "
+                  f"CdW diff={d1:+.4f} (p={p1:.2g})")
+
+print("
+================ learning - control, single-regressor fits (pooled) ================")
+for mg, mice in MOUSE_GROUPS.items():
+    for k in [(v, f) for v in ['cont_halves', 'cont_slope'] for f in ['paper', 'dC', 'CdW']]:
+        sl = [r['fits'][k]['suff'] for r in qc if r['condition'] == 'learning'
+              and r['mouse'] in mice and k in r['fits']]
+        sc = [r['fits'][k]['suff'] for r in qc if r['condition'] == 'control'
+              and r['mouse'] in mice and k in r['fits']]
+        if sl and sc:
+            d, p = pooled_diff_p(sc, sl)
+            print(f"  {mg:13s} {k[0]:12s} {k[1]:5s} learning - control = {d:+.4f}, p={p:.2g}")
 
 #%% ============================================================================
 # CELL 5: Figure — pooled beta per variant

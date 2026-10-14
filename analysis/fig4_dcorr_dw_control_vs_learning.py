@@ -91,7 +91,6 @@ MIN_REPEATS = 10
 N_SD_OUTLIER = 2
 amp_thr = 0.1          # "responsive target" for outlier-group exclusion
 MIN_GROUPS = 10
-N_PERM = 5000
 N_BINS = 6
 
 CONDITION_LABELS = {
@@ -422,8 +421,8 @@ print("Saved.")
 # CELL 6: Pooled stats
 # ============================================================================
 # Pool per-session z-scored pairs within a condition, fit y ~ x + target ctrl.
-# Condition difference: beta_learning - beta_control, null from shuffling
-# condition labels across sessions.
+# Condition difference: pairs from both conditions in one pooled OLS with a
+# condition x regressor interaction; Wald p on the interaction (no resampling).
 qc = [r for r in all_results if r['n_groups'] >= MIN_GROUPS]
 for r in all_results:
     if r['n_groups'] < MIN_GROUPS:
@@ -448,6 +447,18 @@ def pooled_fit(sufs):
     return beta[0], t[0], 2 * sps.norm.sf(abs(t[0])), n
 
 
+def pooled_interaction_p(ctrl, lrn, blk):
+    """All pairs from both conditions in one OLS:
+    y ~ x + c + L + L*x + L*c  (L = 1 for learning); Wald p on L*x."""
+    y = np.concatenate([r[blk]['y'] for r in ctrl + lrn])
+    x = np.concatenate([r[blk]['x'] for r in ctrl + lrn])
+    c = np.concatenate([r[blk]['c'] for r in ctrl + lrn])
+    L = np.concatenate([np.full(len(r[blk]['y']), float(i >= len(ctrl)))
+                        for i, r in enumerate(ctrl + lrn)])
+    b, t, p = ols(y, np.column_stack([x, c, L, L * x, L * c]))
+    return p[3]
+
+
 pooled = {}
 for blk in ['dW', 'W1', 'W0']:
     for mg, mice in MOUSE_GROUPS.items():
@@ -460,14 +471,7 @@ for blk in ['dW', 'W1', 'W0']:
             bc, tc, pc, nc = pooled_fit(sc)
             sl = [suff(r, blk) for r in lrn]
             bl, tl, pl, nl = pooled_fit(sl)
-            allsuf = sc + sl
-            rng = np.random.default_rng(0)
-            null = np.empty(N_PERM)
-            for i in range(N_PERM):
-                perm = rng.permutation(len(allsuf))
-                null[i] = (pooled_fit([allsuf[k] for k in perm[len(sc):]])[0] -
-                           pooled_fit([allsuf[k] for k in perm[:len(sc)]])[0])
-            p_diff = (np.sum(np.abs(null) >= abs(bl - bc)) + 1) / (N_PERM + 1)
+            p_diff = pooled_interaction_p(ctrl, lrn, blk)
             pooled[blk, mg, lv] = dict(bc=bc, pc=pc, nc=nc, bl=bl, pl=pl, nl=nl,
                                        p_diff=p_diff, ctrl=ctrl, lrn=lrn)
             sig_c = sum(r[blk]['p'] < 0.05 and r[blk]['beta'] > 0 for r in ctrl)
@@ -479,7 +483,7 @@ for blk in ['dW', 'W1', 'W0']:
             print(f"  {'learning':15s}: {len(lrn):2d} sess, {nl:6d} pairs, pooled beta={bl:+.4f} "
                   f"p={pl:.3g}; sessions beta>0 & p<.05: {sig_l}/{len(lrn)}; "
                   f"beta>0: {sum(r[blk]['beta'] > 0 for r in lrn)}/{len(lrn)}")
-            print(f"  difference {bl - bc:+.4f}, session-label permutation p={p_diff:.4f}")
+            print(f"  difference {bl - bc:+.4f}, pooled interaction p={p_diff:.4f}")
 
 #%% ============================================================================
 # CELL 7: Figure — binned dA_rho vs dW (target control regressed out)
@@ -524,7 +528,7 @@ for mg in MOUSE_GROUPS:
             ax.axhline(0, color='k', ls='--', alpha=0.3)
             ax.set_xlabel(XLAB[blk])
             ax.set_ylabel(YLAB[blk])
-            ax.set_title(f"{blk}: difference p={P['p_diff']:.3f} (session perm)")
+            ax.set_title(f"{blk}: difference p={P['p_diff']:.3f} (pooled interaction)")
             ax.legend(fontsize=8, loc='upper left')
     fig.suptitle(f'Paper-1 Fig. 4 metric, water control vs BCI learning ({mg}, '
                  f'mean ± SEM over pairs)', fontweight='bold')
