@@ -295,8 +295,7 @@ for mg, mice in MOUSE_GROUPS.items():
             print(f"  learning - control {v:14s} dC diff={d0:+.4f} (p={p0:.2g})  "
                   f"CdW diff={d1:+.4f} (p={p1:.2g})")
 
-print("
-================ learning - control, single-regressor fits (pooled) ================")
+print("\n================ learning - control, single-regressor fits (pooled) ================")
 for mg, mice in MOUSE_GROUPS.items():
     for k in [(v, f) for v in ['cont_halves', 'cont_slope'] for f in ['paper', 'dC', 'CdW']]:
         sl = [r['fits'][k]['suff'] for r in qc if r['condition'] == 'learning'
