@@ -91,6 +91,11 @@ dist_nontarg_min = 30
 dist_nontarg_max = float(os.environ.get('NONTARG_MAX', 1000))
 # output files get a suffix when the non-target range is not the default
 TAG = '' if dist_nontarg_max == 1000 else f'_nt{int(dist_nontarg_max)}'
+# TEST_MAX: fit on all pairs, but score held-out predictions only on pairs
+# whose non-target is closer than TEST_MAX um to the stim site
+TEST_MAX = float(os.environ['TEST_MAX']) if os.environ.get('TEST_MAX') else None
+if TEST_MAX is not None:
+    TAG += f'_test{int(TEST_MAX)}'
 amp0_thr = 0.1
 amp1_thr = 0.1
 N_SD_OUTLIER = 2
@@ -190,7 +195,7 @@ def session_fit(mouse, session, condition):
     is_E = ~is_outlier & np.isfinite(mean_amp_nontarg)
 
     # ---- Pair selection (E->E) ----
-    dw_list, pair_cl_list, pair_nt_list = [], [], []
+    dw_list, pair_cl_list, pair_nt_list, dist_list = [], [], [], []
     for gi in range(stimDist.shape[1]):
         cl = np.where((stimDist[:, gi] < dist_target_lt) &
                       (AMP[0][:, gi] > amp0_thr) & (AMP[1][:, gi] > amp1_thr))[0]
@@ -203,12 +208,14 @@ def session_fit(mouse, session, condition):
         dw_list.append(AMP[1][nontarg, gi] - AMP[0][nontarg, gi])
         pair_cl_list.append(cl)
         pair_nt_list.append(nontarg)
+        dist_list.append(stimDist[nontarg, gi])
     n_groups = len(dw_list)
     if n_groups == 0:
         raise RuntimeError('no valid pairs')
 
     Y = np.nan_to_num(np.concatenate(dw_list), nan=0.0)
     all_nt = np.concatenate(pair_nt_list)
+    pair_dist = np.concatenate(dist_list)
     n_pairs = len(Y)
     cl_weights = np.zeros((n_pairs, n_neurons))
     offset = 0
@@ -243,10 +250,13 @@ def session_fit(mouse, session, condition):
         if sig_y == 0 or not np.isfinite(sig_y):
             sig_y = 1.0
         beta = np.linalg.pinv(X[train_idx]) @ ((Y_tr - mu_y) / sig_y)
+        if TEST_MAX is not None:
+            test_idx = test_idx[pair_dist[test_idx] < TEST_MAX]
+            Y_te = Y[test_idx]
         pred_tr, pred_te = X[train_idx] @ beta, X[test_idx] @ beta
         r_tr_f.append(pearsonr(pred_tr, (Y_tr - mu_y) / sig_y)[0]
                       if np.std(pred_tr) > 0 else 0.0)
-        if np.std(pred_te) > 0:
+        if len(pred_te) > 2 and np.std(pred_te) > 0:
             r, p = pearsonr(pred_te, (Y_te - mu_y) / sig_y)
         else:
             r, p = 0.0, 1.0
