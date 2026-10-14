@@ -4,6 +4,7 @@ rank-normal scored within each session (so sessions with small prediction
 scale aren't compressed), then binned by pooled quantile; mean ± SEM over pairs.
 Prints JSON for plotting."""
 import json
+import os
 import sys
 import numpy as np
 from scipy import stats as sps
@@ -11,7 +12,8 @@ from scipy import stats as sps
 N_BINS = 6
 MIN_GROUPS = 10
 conds = sys.argv[1:] or ['control', 'learning_pseudo']
-res = np.load('/root/capsule/results/three_factor_control_vs_learning.npy', allow_pickle=True)
+res = np.load('/root/capsule/results/three_factor_control_vs_learning'
+              + os.environ.get('TAG', '') + '.npy', allow_pickle=True)
 out = {}
 for cond in conds:
     ss = [r for r in res if r['condition'] == cond and r['n_groups'] >= MIN_GROUPS]

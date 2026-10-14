@@ -88,7 +88,9 @@ PRE_EPOCH_SEC = 10          # trial pre epoch length = control pseudo-trial leng
 # Pair selection
 dist_target_lt = 10
 dist_nontarg_min = 30
-dist_nontarg_max = 1000
+dist_nontarg_max = float(os.environ.get('NONTARG_MAX', 1000))
+# output files get a suffix when the non-target range is not the default
+TAG = '' if dist_nontarg_max == 1000 else f'_nt{int(dist_nontarg_max)}'
 amp0_thr = 0.1
 amp1_thr = 0.1
 N_SD_OUTLIER = 2
@@ -289,7 +291,7 @@ for condition, sessions in [(c, s) for c, s in [('control', CONTROL_SESSIONS),
 #%% ============================================================================
 # CELL 5: Save
 # ============================================================================
-np.save(os.path.join(RESULTS_DIR, 'three_factor_control_vs_learning.npy'),
+np.save(os.path.join(RESULTS_DIR, f'three_factor_control_vs_learning{TAG}.npy'),
         all_results, allow_pickle=True)
 print("Saved.")
 
@@ -387,7 +389,7 @@ fig.legend(handles=handles, loc='lower center', ncol=len(mouse_list),
 fig.suptitle('3-factor MLR (E->E): BCI learning vs water control '
              '(black edge: session p<0.05)', fontweight='bold')
 plt.tight_layout()
-plt.savefig(os.path.join(RESULTS_DIR, 'fig_three_factor_control_vs_learning.png'),
+plt.savefig(os.path.join(RESULTS_DIR, f'fig_three_factor_control_vs_learning{TAG}.png'),
             dpi=150, bbox_inches='tight')
 plt.close(fig)
 print("Figure saved.")
@@ -485,7 +487,7 @@ axes[0].set_ylabel(r'Actual $\Delta W$ (z)')
 fig.suptitle('3-factor MLR, E->E pairs, all mice pooled (95% CI: session bootstrap)',
              fontweight='bold')
 plt.tight_layout()
-plt.savefig(os.path.join(RESULTS_DIR, 'fig_three_factor_pooled_control_vs_learning.png'),
+plt.savefig(os.path.join(RESULTS_DIR, f'fig_three_factor_pooled_control_vs_learning{TAG}.png'),
             dpi=150, bbox_inches='tight')
 plt.close(fig)
 print("Pooled figure saved.")

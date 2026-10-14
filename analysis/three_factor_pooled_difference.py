@@ -3,11 +3,13 @@ condition (all mice), pooled r with its Pearson p, and the condition
 difference from one pooled regression with a condition x prediction
 interaction (Wald p) plus a Fisher z-test on the two pooled r's. No resampling.
 Reads three_factor_control_vs_learning.npy (outliers already excluded)."""
+import os
 import numpy as np
 from scipy import stats as sps
 
 MIN_GROUPS = 10
-res = np.load('/root/capsule/results/three_factor_control_vs_learning.npy', allow_pickle=True)
+res = np.load('/root/capsule/results/three_factor_control_vs_learning'
+              + os.environ.get('TAG', '') + '.npy', allow_pickle=True)
 qc = [r for r in res if r['n_groups'] >= MIN_GROUPS]
 
 
