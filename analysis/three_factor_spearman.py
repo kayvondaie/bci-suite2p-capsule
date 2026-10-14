@@ -1,11 +1,14 @@
 """Pooled Pearson vs Spearman of held-out predicted vs actual dW per condition,
 from three_factor_control_vs_learning<TAG>.npy (TAG env var, e.g. _test100).
 Spearman on raw pooled predictions and on within-session ranks."""
+import json
 import os
 import numpy as np
 from scipy import stats as sps
 
 MIN_GROUPS = 10
+N_BINS = 6
+out = {}
 tag = os.environ.get('TAG', '')
 res = np.load(f'/root/capsule/results/three_factor_control_vs_learning{tag}.npy', allow_pickle=True)
 print(f'file tag: {tag or "(none)"}')
@@ -22,3 +25,10 @@ for cond in ['control', 'learning', 'learning_pseudo']:
     wr, wp = sps.pearsonr(xr, yr)
     print(f'{cond:16s} {len(ss):2d} sess {len(x):7d} pairs | Pearson r={pr:+.4f} p={pp:.2g} | '
           f'Spearman rho={sr:+.4f} p={sp:.2g} | within-session-rank rho={wr:+.4f} p={wp:.2g}')
+    # rank-rank curve: within-session percentile of predicted vs actual, binned
+    idx = np.clip((xr * N_BINS).astype(int), 0, N_BINS - 1)
+    out[cond] = dict(bx=[float(xr[idx == b].mean()) for b in range(N_BINS)],
+                     by=[float(yr[idx == b].mean()) for b in range(N_BINS)],
+                     be=[float(yr[idx == b].std() / np.sqrt(np.sum(idx == b))) for b in range(N_BINS)],
+                     rho=float(sr), p=float(sp), n_pairs=int(len(x)), n_sess=len(ss))
+print('JSON' + json.dumps(out))
