@@ -18,6 +18,10 @@
 # Each pair variant gives two regressors:
 #   paper : sum_j (C1_ij W~1_j - C0_ij W~0_j)       (paper-1 definition)
 #   dC    : sum_j (C1_ij - C0_ij) (W~0_j + W~1_j)/2 (correlation change only)
+#   CdW   : sum_j (C0_ij + C1_ij)/2 (W~1_j - W~0_j)   (correlation-weighted
+#           target change; paper = dC + CdW exactly)
+# joint fits: dW ~ dC + CdW + target dW, to see which part of the paper
+# regressor carries the effect once the summed target change is regressed out.
 # Slopes give dC only (S_ij in place of C1 - C0, per unit session time).
 import os
 _SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -132,7 +136,7 @@ def session_fit(mouse, session, condition):
         is_out[:] = False
 
     keys = [(v, form) for v, c in CV.items()
-            for form in (['paper', 'dC'] if c[0] == 'pair' else ['dC'])]
+            for form in (['paper', 'dC', 'CdW'] if c[0] == 'pair' else ['dC'])]
     rows = {k: [] for k in keys}
     y_list, c_list, n_used = [], [], 0
     for g in range(n_groups):
@@ -157,6 +161,7 @@ def session_fit(mouse, session, condition):
                 C0, C1 = c[1][np.ix_(nt, tg)], c[2][np.ix_(nt, tg)]
                 rows[v, 'paper'].append(C1 @ w1 - C0 @ w0)
                 rows[v, 'dC'].append((C1 - C0) @ wbar)
+                rows[v, 'CdW'].append(((C0 + C1) / 2) @ (w1 - w0))
             else:
                 rows[v, 'dC'].append(c[1][np.ix_(nt, tg)] @ wbar)
         n_used += 1
@@ -164,17 +169,23 @@ def session_fit(mouse, session, condition):
         raise RuntimeError('no valid groups')
     y, c = zs(np.concatenate(y_list)), zs(np.concatenate(c_list))
     res = dict(mouse=mouse, session=session, condition=condition, n_groups=n_used,
-               n_pairs=len(y), fits={})
+               n_pairs=len(y), fits={}, joint={})
     for k in keys:
         x = zs(np.concatenate(rows[k]))
         b, t, p = ols(y, np.column_stack([x, c]))
         res['fits'][k] = dict(beta=b[0], p=p[0],
-                              suff=_suff(y, x, c))
+                              suff=_suff(y, np.column_stack([x, c])))
+    for v, cv in CV.items():
+        if cv[0] != 'pair':
+            continue
+        A = np.column_stack([zs(np.concatenate(rows[v, 'dC'])),
+                             zs(np.concatenate(rows[v, 'CdW'])), c])
+        b, t, p = ols(y, A)
+        res['joint'][v] = dict(beta=b, p=p, suff=_suff(y, A))
     return res
 
 
-def _suff(y, x, c):
-    A = np.column_stack([x, c])
+def _suff(y, A):
     return A.T @ A, A.T @ y, y @ y, len(y)
 
 
@@ -208,9 +219,20 @@ def pooled_fit(sufs):
     yty = sum(s[2] for s in sufs)
     n = sum(s[3] for s in sufs)
     beta = np.linalg.solve(XtX, Xty)
-    s2 = (yty - beta @ Xty) / (n - 2)
+    s2 = (yty - beta @ Xty) / (n - len(beta))
     se = np.sqrt(np.diag(s2 * np.linalg.inv(XtX)))
     return beta[0], se[0], 2 * sps.norm.sf(abs(beta[0] / se[0])), n
+
+
+def pooled_fit_all(sufs):
+    XtX = sum(s[0] for s in sufs)
+    Xty = sum(s[1] for s in sufs)
+    yty = sum(s[2] for s in sufs)
+    n = sum(s[3] for s in sufs)
+    beta = np.linalg.solve(XtX, Xty)
+    s2 = (yty - beta @ Xty) / (n - len(beta))
+    se = np.sqrt(np.diag(s2 * np.linalg.inv(XtX)))
+    return beta, se, 2 * sps.norm.sf(np.abs(beta / se))
 
 
 qc = [r for r in all_results if r['n_groups'] >= MIN_GROUPS]
@@ -231,6 +253,19 @@ for mg, mice in MOUSE_GROUPS.items():
             print(f"  {cond:8s} {k[0]:14s} {k[1]:5s} beta={b:+.4f} ± {se:.4f} p={p:.2g} | "
                   f"sess beta>0 {npos}/{len(ss)}, beta>0&p<.05 {nsig}/{len(ss)}")
 
+print("\n================ JOINT dW ~ dC + CdW + target dW (pooled) ================")
+for mg, mice in MOUSE_GROUPS.items():
+    print(f"\n### {mg}")
+    for cond in ['learning', 'control']:
+        sess = [r for r in qc if r['condition'] == cond and r['mouse'] in mice]
+        for v in VARIANTS:
+            ss = [r for r in sess if v in r.get('joint', {})]
+            if not ss:
+                continue
+            b, se, p = pooled_fit_all([r['joint'][v]['suff'] for r in ss])
+            print(f"  {cond:8s} {v:14s} dC={b[0]:+.4f} (p={p[0]:.2g})  CdW={b[1]:+.4f} "
+                  f"(p={p[1]:.2g})  target dW={b[2]:+.4f} (p={p[2]:.2g})  n={len(ss)}")
+
 #%% ============================================================================
 # CELL 5: Figure — pooled beta per variant
 # ============================================================================
@@ -238,7 +273,7 @@ fig, axes = plt.subplots(1, 3, figsize=(17, 5.5), sharey=True)
 for ax, mg in zip(axes, MOUSE_GROUPS):
     labels, xi = [], 0
     for v in VARIANTS:
-        for form in ['paper', 'dC']:
+        for form in ['paper', 'dC', 'CdW']:
             for cond, color, dx in [('learning', '#e74c3c', -0.15), ('control', '#3498db', 0.15)]:
                 s = summary.get((mg, cond, (v, form)))
                 if s is None:
