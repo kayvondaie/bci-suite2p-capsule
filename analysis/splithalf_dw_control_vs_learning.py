@@ -25,6 +25,12 @@
 # the mean map W = (W0 + W1)/2, i.e. "reliable change relative to reliable
 # connectivity".
 #
+# Robustness: each cell's per-repeat responses are divided by that cell's SD
+# across all repeats of the map (noise-normalised response, cf. paper-1 W~)
+# and clipped at +/- CLIP_SD, identically in both conditions. Sessions whose
+# pair-specific W split-half r < MIN_PAIR_R_W (no measurable pair-level
+# connectivity) are left out of the pooled stats.
+#
 # Stats (pooled, no resampling): per-unit products of the normalised half
 # estimates, pooled over all sessions of a condition; mean ± SE, z-test vs 0
 # and between conditions. Putative SST outliers excluded (as postsynaptic cells,
@@ -39,6 +45,8 @@ exec(_code[:_code.index('# CELL 4: Per-session regressors and fits')])
 NONTARG_FIT = (30, 1000)      # pairs used for the two-way decomposition
 NONTARG_CLOSE = 100           # pair-specific component also reported < 100 um
 MIN_HALF_REPEATS = 5
+CLIP_SD = 5
+MIN_PAIR_R_W = 0.05
 N_ITER = 30
 
 #%% ============================================================================
@@ -65,6 +73,9 @@ def load_maps(mouse, session, condition):
     halves = []                                   # [map][half] -> cells x groups
     for pi, pkey in enumerate(['photostim', 'photostim2']):
         r, s, _ = repeat_responses(ps_file(folder, pkey), mouse, dt, D[pi])
+        sd = np.nanstd(r, axis=1, keepdims=True)
+        sd[~(sd > 0)] = np.nan
+        r = np.clip(r / sd, -CLIP_SD, CLIP_SD)
         n_groups = D[pi].shape[1]
         H = np.full((2, r.shape[0], n_groups), np.nan)
         for g in range(n_groups):
@@ -190,6 +201,11 @@ print("Saved.")
 # CELL 4: Pooled stats
 # ============================================================================
 COMPONENTS = ['total', 'row', 'col', 'pair', 'pair_close']
+for cond in ['control', 'learning']:
+    rr = [r for r in all_results if r['condition'] == cond]
+    ok = [r for r in rr if r.get('r_pair_W', 0) >= MIN_PAIR_R_W]
+    print(f"QC {cond}: {len(ok)}/{len(rr)} sessions with pair-specific W split-half r >= "
+          f"{MIN_PAIR_R_W}: " + ', '.join(f"{r['mouse']} {r['session']} ({r['r_pair_W']:.2f})" for r in ok))
 summary = {}
 print("\n======== reliable change / reliable connectivity (pooled products) ========")
 for mg, mice in MOUSE_GROUPS.items():
@@ -198,7 +214,7 @@ for mg, mice in MOUSE_GROUPS.items():
         st = {}
         for cond in ['control', 'learning']:
             ss = [r for r in all_results if r['condition'] == cond and r['mouse'] in mice
-                  and k in r['prod']]
+                  and k in r['prod'] and r.get('r_pair_W', 0) >= MIN_PAIR_R_W]
             if not ss:
                 continue
             x = np.concatenate([r['prod'][k] for r in ss])
@@ -231,7 +247,8 @@ for ax, k in zip(axes, COMPONENTS):
             continue
         ax.bar(xi, st[cond]['m'], yerr=st[cond]['se'], color=color, alpha=0.7, capsize=4)
         ratios = [r['rel'][k.replace('_close', '')]['ratio'] for r in all_results
-                  if r['condition'] == cond and k in r['prod']]
+                  if r['condition'] == cond and k in r['prod']
+                  and r.get('r_pair_W', 0) >= MIN_PAIR_R_W]
         rng = np.random.default_rng(0)
         ax.plot(xi + rng.uniform(-0.15, 0.15, len(ratios)), ratios, 'k.', alpha=0.5)
     ax.axhline(0, color='k', lw=0.8)
