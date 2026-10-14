@@ -8,8 +8,8 @@
 #   learning: BCI-epoch df_closedloop (photostim maps before/after BCI)
 # Within a session, Delta-correlation = correlation over the late half of
 # pseudo-trials minus the early half (no day-to-day split exists here).
-# learning_matched uses only the first/last K pseudo-trials of the BCI epoch,
-# K = median control half length, so correlation estimates have equal noise.
+# control_matched uses only the first/last K spont pseudo-trials (controls have
+# longer spont than learning BCI epochs), K = median learning half length.
 #
 # Paper-1 metrics (Methods, "Causal connectivity" / "fitting"):
 #   repeat response   r_{i,g,a} = <F>_after - <F>_before   (Fstim, per repeat)
@@ -97,7 +97,7 @@ N_BINS = 6
 CONDITION_LABELS = {
     'control': 'Control (water; spont pseudo-trials)',
     'learning': 'Learning (BCI pseudo-trials, halves)',
-    'learning_matched': 'Learning (BCI, first/last K pseudo-trials)',
+    'control_matched': 'Control (first/last K spont pseudo-trials)',
 }
 
 #%% ============================================================================
@@ -315,6 +315,22 @@ def session_regressors(S, mouse, early, late):
     if n_used == 0:
         raise RuntimeError('no valid groups')
     out = {k: np.concatenate(v) for k, v in rows.items()}
+    # Diagnostic (paper Fig. 4-S1): across groups, summed target W~ vs mean
+    # non-target W~ in the post map
+    gt, gn, tmax = [], [], []
+    for g in range(n_groups):
+        tg = np.where(D[1][:, g] < TARGET_UM)[0]
+        nt = np.where((D[1][:, g] > NONTARG_UM[0]) & (D[1][:, g] < NONTARG_UM[1]) & ~is_out)[0]
+        if tg.size and nt.size and np.isfinite(Wt[1][tg, g]).any() and np.isfinite(Wt[1][nt, g]).any():
+            gt.append(np.nansum(Wt[1][tg, g]))
+            gn.append(np.nanmean(Wt[1][nt, g]))
+            tmax.append(np.nanmax(Wt[1][tg, g]))
+    gt, gn = np.array(gt), np.array(gn)
+    out['diag'] = dict(
+        r_tgt_nt=np.corrcoef(gt, gn)[0, 1] if len(gt) > 3 else np.nan,
+        med_max_target_W=np.median(tmax) if tmax else np.nan,
+        med_nontarget_W=np.median(gn) if len(gn) else np.nan,
+        n_groups_total=n_groups)
     out['n_groups'] = n_used
     out['n_outliers'] = int(is_out.sum())
     return out
@@ -329,7 +345,7 @@ def fit_block(R, y, x, ctrl):
 
 def run_session(mouse, session, condition, S, k_match=None):
     segs = S['segs']
-    if condition == 'learning_matched':
+    if condition == 'control_matched':
         if k_match is None or 2 * k_match > len(segs):
             raise RuntimeError(f'cannot match K={k_match} with {len(segs)} pseudo-trials')
         early, late = segs[:k_match], segs[-k_match:]
@@ -341,7 +357,7 @@ def run_session(mouse, session, condition, S, k_match=None):
     R = session_regressors(S, mouse, early, late)
     res = dict(mouse=mouse, session=session, condition=condition,
                n_groups=R['n_groups'], n_pairs=len(R['dW']), n_half=len(early),
-               n_outliers=R['n_outliers'], offsets=S['offsets'])
+               n_outliers=R['n_outliers'], offsets=S['offsets'], diag=R['diag'])
     res['dW'] = fit_block(R, 'dW', 'dA', 'dWg')     # Fig 4h
     res['W1'] = fit_block(R, 'W1', 'A1', 'W1g')     # Fig 4e, map after activity
     res['W0'] = fit_block(R, 'W0', 'A0', 'W0g')     # Fig 4e, map before activity
@@ -352,6 +368,10 @@ def report(r):
     print(f"  [{r['condition']}] {r['n_groups']} groups, {r['n_pairs']} pairs, "
           f"{r['n_half']} pseudo-trials/half, outliers {r['n_outliers']}, "
           f"seq offsets {r['offsets']}")
+    d = r['diag']
+    print(f"    diag: {d['n_groups_total']} groups; r(sum target W, mean non-target W)="
+          f"{d['r_tgt_nt']:+.3f}; median max target W={d['med_max_target_W']:.2f}; "
+          f"median non-target W={d['med_nontarget_W']:+.3f}")
     for blk in ['dW', 'W1', 'W0']:
         b = r[blk]
         print(f"    {blk:3s}: beta={b['beta']:+.4f} p={b['p']:.3g} | "
@@ -359,12 +379,12 @@ def report(r):
 
 
 all_results = []
-control_halves = []
-for condition, sessions in [('control', CONTROL_SESSIONS),
-                            ('learning', LEARNING_SESSIONS)]:
-    k_match = int(np.median(control_halves)) if control_halves else None
-    if condition == 'learning':
-        print(f"\nK (matched pseudo-trials per half) = {k_match}")
+learning_halves = []
+for condition, sessions in [('learning', LEARNING_SESSIONS),
+                            ('control', CONTROL_SESSIONS)]:
+    k_match = int(np.median(learning_halves)) if learning_halves else None
+    if condition == 'control':
+        print(f"\nK (matched pseudo-trials per half, median learning) = {k_match}")
     for mouse, session in sessions:
         if (mouse, session) in EXCLUDE:
             continue
@@ -378,13 +398,13 @@ for condition, sessions in [('control', CONTROL_SESSIONS),
             print(f"  LOAD FAILED: {e}")
             traceback.print_exc()
             continue
-        conds = ['control'] if condition == 'control' else ['learning', 'learning_matched']
+        conds = ['learning'] if condition == 'learning' else ['control', 'control_matched']
         for cond in conds:
             try:
                 r = run_session(mouse, session, cond, S, k_match)
                 all_results.append(r)
-                if cond == 'control':
-                    control_halves.append(r['n_half'])
+                if cond == 'learning':
+                    learning_halves.append(r['n_half'])
                 report(r)
             except Exception as e:
                 print(f"  [{cond}] FAILED: {e}")
@@ -431,13 +451,13 @@ def pooled_fit(sufs):
 pooled = {}
 for blk in ['dW', 'W1', 'W0']:
     for mg, mice in MOUSE_GROUPS.items():
-        ctrl = [r for r in qc if r['condition'] == 'control' and r['mouse'] in mice]
-        sc = [suff(r, blk) for r in ctrl]
-        bc, tc, pc, nc = pooled_fit(sc)
-        for lv in ['learning', 'learning_matched']:
-            lrn = [r for r in qc if r['condition'] == lv and r['mouse'] in mice]
+        lrn = [r for r in qc if r['condition'] == 'learning' and r['mouse'] in mice]
+        for lv in ['control', 'control_matched']:
+            ctrl = [r for r in qc if r['condition'] == lv and r['mouse'] in mice]
             if not ctrl or not lrn:
                 continue
+            sc = [suff(r, blk) for r in ctrl]
+            bc, tc, pc, nc = pooled_fit(sc)
             sl = [suff(r, blk) for r in lrn]
             bl, tl, pl, nl = pooled_fit(sl)
             allsuf = sc + sl
@@ -452,11 +472,11 @@ for blk in ['dW', 'W1', 'W0']:
                                        p_diff=p_diff, ctrl=ctrl, lrn=lrn)
             sig_c = sum(r[blk]['p'] < 0.05 and r[blk]['beta'] > 0 for r in ctrl)
             sig_l = sum(r[blk]['p'] < 0.05 and r[blk]['beta'] > 0 for r in lrn)
-            print(f"\n=== {blk} | {mg} | control vs {lv} ===")
-            print(f"  control : {len(ctrl):2d} sess, {nc:6d} pairs, pooled beta={bc:+.4f} "
+            print(f"\n=== {blk} | {mg} | {lv} vs learning ===")
+            print(f"  {lv:15s}: {len(ctrl):2d} sess, {nc:6d} pairs, pooled beta={bc:+.4f} "
                   f"p={pc:.3g}; sessions beta>0 & p<.05: {sig_c}/{len(ctrl)}; "
                   f"beta>0: {sum(r[blk]['beta'] > 0 for r in ctrl)}/{len(ctrl)}")
-            print(f"  {lv:9s}: {len(lrn):2d} sess, {nl:6d} pairs, pooled beta={bl:+.4f} "
+            print(f"  {'learning':15s}: {len(lrn):2d} sess, {nl:6d} pairs, pooled beta={bl:+.4f} "
                   f"p={pl:.3g}; sessions beta>0 & p<.05: {sig_l}/{len(lrn)}; "
                   f"beta>0: {sum(r[blk]['beta'] > 0 for r in lrn)}/{len(lrn)}")
             print(f"  difference {bl - bc:+.4f}, session-label permutation p={p_diff:.4f}")
@@ -479,7 +499,7 @@ def binned(sessions, blk):
     return bx, by, be
 
 
-COLORS = {'control': '#3498db', 'learning': '#e74c3c', 'learning_matched': '#c0392b'}
+COLORS = {'control': '#3498db', 'control_matched': '#1f618d', 'learning': '#e74c3c'}
 YLAB = {'dW': r'$\Delta W$ (z, target $\Delta W$ regressed)',
         'W1': r'$W$ after (z, target $W$ regressed)',
         'W0': r'$W$ before (z, target $W$ regressed)'}
@@ -488,15 +508,15 @@ XLAB = {'dW': r'$\Delta$ correlation with targets, $\Delta A^\rho$ (z)',
         'W0': r'Correlation with targets, $A^\rho$ (z)'}
 for mg in MOUSE_GROUPS:
     fig, axes = plt.subplots(2, 3, figsize=(15, 9))
-    for row, lv in enumerate(['learning', 'learning_matched']):
+    for row, lv in enumerate(['control', 'control_matched']):
         for col, blk in enumerate(['dW', 'W1', 'W0']):
             ax = axes[row, col]
             P = pooled.get((blk, mg, lv))
             if P is None:
                 ax.axis('off')
                 continue
-            for cond, group, b, p in [('control', P['ctrl'], P['bc'], P['pc']),
-                                      (lv, P['lrn'], P['bl'], P['pl'])]:
+            for cond, group, b, p in [(lv, P['ctrl'], P['bc'], P['pc']),
+                                      ('learning', P['lrn'], P['bl'], P['pl'])]:
                 bx, by, be = binned(group, blk)
                 ax.errorbar(bx, by, yerr=be, fmt='o-', color=COLORS[cond], capsize=3,
                             lw=2, label=f"{CONDITION_LABELS[cond]}\n"
@@ -517,14 +537,14 @@ for mg in MOUSE_GROUPS:
 fig, axes = plt.subplots(1, 3, figsize=(14, 4.5), sharey=True)
 for ax, mg in zip(axes, MOUSE_GROUPS):
     rng = np.random.default_rng(0)
-    for xi, cond in enumerate(['control', 'learning', 'learning_matched']):
+    for xi, cond in enumerate(['control', 'control_matched', 'learning']):
         for r in [r for r in qc if r['condition'] == cond and r['mouse'] in MOUSE_GROUPS[mg]]:
             ax.plot(xi + rng.uniform(-0.12, 0.12), r['dW']['beta'], 'o',
                     color=COLORS[cond], alpha=0.7,
                     markeredgecolor='k' if r['dW']['p'] < 0.05 else 'none')
     ax.axhline(0, color='k', alpha=0.3)
     ax.set_xticks([0, 1, 2])
-    ax.set_xticklabels(['Control', 'Learning\n(halves)', 'Learning\n(matched K)'])
+    ax.set_xticklabels(['Control\n(halves)', 'Control\n(matched K)', 'Learning'])
     ax.set_title(mg)
 axes[0].set_ylabel(r'$\beta$ ($\Delta A^\rho \rightarrow \Delta W$), per session')
 fig.suptitle('Per-session Fig. 4h coefficient (black edge: p<0.05)', fontweight='bold')
