@@ -1,0 +1,264 @@
+#%% ============================================================================
+# CELL 1: Imports and Setup
+# ============================================================================
+# Paper-1 Fig. 4h (Delta-correlation -> Delta-W) with different definitions of
+# Delta-correlation from the BCI training activity. Photostim metric (W~, dW~,
+# masks, outlier exclusion) is identical to fig4_dcorr_dw_control_vs_learning.py,
+# whose CELLS 1-3 (config + loading) are executed here.
+#
+# Delta-correlation variants (C0 = early, C1 = late):
+#   cont_halves   continuous activity (BCI df_closedloop / control spont), halves
+#   cont_slope    continuous activity, OLS slope of C over 8 equal blocks
+#   trial_halves  trial-aligned F, first vs second half of trials
+#   trial_first40 trial-aligned F, trials 1-20 vs 21-40 (paper-1 trial range)
+#   trial_slope   trial-aligned F, OLS slope of C over 10-trial windows (step 5)
+#   signal_halves correlation of the trial-averaged response (per half)
+#   noise_halves  correlation of residuals around the trial average (per half)
+# cont_* also exist for water controls (spont); trial_* are learning only.
+# Each pair variant gives two regressors:
+#   paper : sum_j (C1_ij W~1_j - C0_ij W~0_j)       (paper-1 definition)
+#   dC    : sum_j (C1_ij - C0_ij) (W~0_j + W~1_j)/2 (correlation change only)
+# Slopes give dC only (S_ij in place of C1 - C0, per unit session time).
+import os
+_SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                    'fig4_dcorr_dw_control_vs_learning.py')
+with open(_SRC) as _f:
+    _code = _f.read()
+exec(_code[:_code.index('# CELL 4: Per-session regressors and fits')])
+
+N_BLOCKS = 8
+TRIAL_WIN = 10
+TRIAL_STEP = 5
+VARIANTS = ['cont_halves', 'cont_slope', 'trial_halves', 'trial_first40',
+            'trial_slope', 'signal_halves', 'noise_halves']
+
+#%% ============================================================================
+# CELL 2: Correlation helpers
+# ============================================================================
+def corr_cols(x):
+    """Pearson correlation of rows of x (cells x samples). Columns that are
+    mostly NaN (past the end of a trial) are dropped; remaining NaNs are set to
+    the cell's mean so they add nothing to the covariance."""
+    x = x[:, np.mean(np.isfinite(x), axis=0) > 0.5]
+    mu = np.nanmean(x, axis=1, keepdims=True)
+    x = np.where(np.isfinite(x), x, mu) - mu
+    x = np.nan_to_num(x)
+    sd = np.sqrt((x ** 2).mean(axis=1))
+    sd[sd == 0] = np.inf
+    x = x / sd[:, None]
+    C = (x @ x.T) / x.shape[1]
+    np.fill_diagonal(C, 0.0)
+    return C
+
+
+def trial_cols(F, idx):
+    """frames x cells x trials -> cells x (frames * trials)."""
+    X = F[:, :, idx]
+    return X.transpose(1, 0, 2).reshape(X.shape[1], -1)
+
+
+def slope_matrix(Cs):
+    t = np.linspace(0, 1, len(Cs))
+    t = t - t.mean()
+    return sum(ti * C for ti, C in zip(t, Cs)) / np.sum(t ** 2)
+
+
+def correlation_variants(segs, F):
+    out = {}
+    h = len(segs) // 2
+    out['cont_halves'] = ('pair', corr_matrix(segs[:h]), corr_matrix(segs[h:2 * h]))
+    blocks = np.array_split(np.arange(len(segs)), N_BLOCKS)
+    out['cont_slope'] = ('slope', slope_matrix([corr_matrix([segs[k] for k in b])
+                                                for b in blocks]))
+    if F is None:
+        return out
+    n_tr = F.shape[2]
+    ht = n_tr // 2
+    out['trial_halves'] = ('pair', corr_cols(trial_cols(F, np.arange(ht))),
+                           corr_cols(trial_cols(F, np.arange(ht, 2 * ht))))
+    n40 = min(n_tr, 40) // 2
+    out['trial_first40'] = ('pair', corr_cols(trial_cols(F, np.arange(n40))),
+                            corr_cols(trial_cols(F, np.arange(n40, 2 * n40))))
+    starts = np.arange(0, n_tr - TRIAL_WIN + 1, TRIAL_STEP)
+    out['trial_slope'] = ('slope', slope_matrix(
+        [corr_cols(trial_cols(F, np.arange(s, s + TRIAL_WIN))) for s in starts]))
+    sig, noi = [], []
+    for idx in [np.arange(ht), np.arange(ht, 2 * ht)]:
+        X = F[:, :, idx]
+        psth = np.nanmean(X, axis=2)                      # frames x cells
+        sig.append(corr_cols(psth.T))
+        noi.append(corr_cols(trial_cols(X - psth[:, :, None], np.arange(len(idx)))))
+    out['signal_halves'] = ('pair', sig[0], sig[1])
+    out['noise_halves'] = ('pair', noi[0], noi[1])
+    return out
+
+
+#%% ============================================================================
+# CELL 3: Per-session regressors and fits
+# ============================================================================
+def ols(y, X):
+    A = np.column_stack([np.ones(len(y)), X])
+    beta, *_ = np.linalg.lstsq(A, y, rcond=None)
+    resid = y - A @ beta
+    dof = len(y) - A.shape[1]
+    cov = (resid @ resid / dof) * np.linalg.pinv(A.T @ A)
+    t = beta / np.sqrt(np.diag(cov))
+    return beta[1:], t[1:], 2 * sps.t.sf(np.abs(t[1:]), dof)
+
+
+def zs(v):
+    s = v.std()
+    return (v - v.mean()) / (s if s > 0 else 1.0)
+
+
+def session_fit(mouse, session, condition):
+    S = load_session(mouse, session, condition)
+    F = None
+    if condition == 'learning':
+        folder = learning_folder(mouse, session)
+        F = np.asarray(ddct.load_hdf5(folder, ['F'], [])['F'], dtype=float)
+    CV = correlation_variants(S['segs'], F)
+    del F, S['segs']
+
+    AMP, D, MU, SD = S['AMP'], S['D'], S['MU'], S['SD']
+    Wt = [MU[0] / SD[0], MU[1] / SD[1]]
+    dWt = (MU[1] - MU[0]) / np.sqrt(SD[0] ** 2 + SD[1] ** 2)
+    n_groups = Wt[0].shape[1]
+    amp_avg = (AMP[0] + AMP[1]) / 2
+    amp_avg[np.minimum(D[0], D[1]) < NONTARG_UM[0]] = np.nan
+    mean_nt = np.nanmean(amp_avg, axis=1)
+    is_out = mean_nt > np.nanmean(mean_nt) + N_SD_OUTLIER * np.nanstd(mean_nt)
+    if mouse not in PAN_NEURONAL_MICE:
+        is_out[:] = False
+
+    keys = [(v, form) for v, c in CV.items()
+            for form in (['paper', 'dC'] if c[0] == 'pair' else ['dC'])]
+    rows = {k: [] for k in keys}
+    y_list, c_list, n_used = [], [], 0
+    for g in range(n_groups):
+        tg = np.where((D[0][:, g] < TARGET_UM) & (D[1][:, g] < TARGET_UM))[0]
+        if tg.size == 0:
+            continue
+        resp_t = tg[(AMP[0][tg, g] > amp_thr) & (AMP[1][tg, g] > amp_thr)]
+        if np.any(is_out[resp_t]):
+            continue
+        nt = np.where((D[0][:, g] > NONTARG_UM[0]) & (D[0][:, g] < NONTARG_UM[1]) &
+                      (D[1][:, g] > NONTARG_UM[0]) & (D[1][:, g] < NONTARG_UM[1]) &
+                      ~is_out & np.isfinite(dWt[:, g]))[0]
+        if nt.size == 0:
+            continue
+        w0 = np.nan_to_num(Wt[0][tg, g])
+        w1 = np.nan_to_num(Wt[1][tg, g])
+        wbar = (w0 + w1) / 2
+        y_list.append(dWt[nt, g])
+        c_list.append(np.full(nt.size, np.nansum(dWt[tg, g])))
+        for v, c in CV.items():
+            if c[0] == 'pair':
+                C0, C1 = c[1][np.ix_(nt, tg)], c[2][np.ix_(nt, tg)]
+                rows[v, 'paper'].append(C1 @ w1 - C0 @ w0)
+                rows[v, 'dC'].append((C1 - C0) @ wbar)
+            else:
+                rows[v, 'dC'].append(c[1][np.ix_(nt, tg)] @ wbar)
+        n_used += 1
+    if n_used == 0:
+        raise RuntimeError('no valid groups')
+    y, c = zs(np.concatenate(y_list)), zs(np.concatenate(c_list))
+    res = dict(mouse=mouse, session=session, condition=condition, n_groups=n_used,
+               n_pairs=len(y), fits={})
+    for k in keys:
+        x = zs(np.concatenate(rows[k]))
+        b, t, p = ols(y, np.column_stack([x, c]))
+        res['fits'][k] = dict(beta=b[0], p=p[0],
+                              suff=_suff(y, x, c))
+    return res
+
+
+def _suff(y, x, c):
+    A = np.column_stack([x, c])
+    return A.T @ A, A.T @ y, y @ y, len(y)
+
+
+all_results = []
+for condition, sessions in [('learning', LEARNING_SESSIONS), ('control', CONTROL_SESSIONS)]:
+    for mouse, session in sessions:
+        if (mouse, session) in EXCLUDE:
+            continue
+        print(f"\n--- {condition}: {mouse} {session} ---")
+        try:
+            r = session_fit(mouse, session, condition)
+            all_results.append(r)
+            print(f"  {r['n_groups']} groups, {r['n_pairs']} pairs")
+            for (v, form), f in r['fits'].items():
+                print(f"    {v:14s} {form:5s} beta={f['beta']:+.4f} p={f['p']:.3g}")
+        except FileNotFoundError as e:
+            print(f"  Skipping -- file not found ({e}).")
+        except Exception as e:
+            print(f"  FAILED: {e}")
+            traceback.print_exc()
+
+np.save(os.path.join(RESULTS_DIR, 'fig4_dcorr_variants.npy'), all_results, allow_pickle=True)
+print("Saved.")
+
+#%% ============================================================================
+# CELL 4: Pooled stats per variant
+# ============================================================================
+def pooled_fit(sufs):
+    XtX = sum(s[0] for s in sufs)
+    Xty = sum(s[1] for s in sufs)
+    yty = sum(s[2] for s in sufs)
+    n = sum(s[3] for s in sufs)
+    beta = np.linalg.solve(XtX, Xty)
+    s2 = (yty - beta @ Xty) / (n - 2)
+    se = np.sqrt(np.diag(s2 * np.linalg.inv(XtX)))
+    return beta[0], se[0], 2 * sps.norm.sf(abs(beta[0] / se[0])), n
+
+
+qc = [r for r in all_results if r['n_groups'] >= MIN_GROUPS]
+summary = {}
+print("\n================ POOLED dW ~ dA + target dW ================")
+for mg, mice in MOUSE_GROUPS.items():
+    print(f"\n### {mg}")
+    for cond in ['learning', 'control']:
+        sess = [r for r in qc if r['condition'] == cond and r['mouse'] in mice]
+        keys = sorted({k for r in sess for k in r['fits']},
+                      key=lambda k: (VARIANTS.index(k[0]), k[1] != 'paper'))
+        for k in keys:
+            ss = [r for r in sess if k in r['fits']]
+            b, se, p, n = pooled_fit([r['fits'][k]['suff'] for r in ss])
+            nsig = sum(r['fits'][k]['p'] < 0.05 and r['fits'][k]['beta'] > 0 for r in ss)
+            npos = sum(r['fits'][k]['beta'] > 0 for r in ss)
+            summary[mg, cond, k] = dict(beta=b, se=se, p=p, n_sess=len(ss), nsig=nsig, npos=npos)
+            print(f"  {cond:8s} {k[0]:14s} {k[1]:5s} beta={b:+.4f} ± {se:.4f} p={p:.2g} | "
+                  f"sess beta>0 {npos}/{len(ss)}, beta>0&p<.05 {nsig}/{len(ss)}")
+
+#%% ============================================================================
+# CELL 5: Figure — pooled beta per variant
+# ============================================================================
+fig, axes = plt.subplots(1, 3, figsize=(17, 5.5), sharey=True)
+for ax, mg in zip(axes, MOUSE_GROUPS):
+    labels, xi = [], 0
+    for v in VARIANTS:
+        for form in ['paper', 'dC']:
+            for cond, color, dx in [('learning', '#e74c3c', -0.15), ('control', '#3498db', 0.15)]:
+                s = summary.get((mg, cond, (v, form)))
+                if s is None:
+                    continue
+                ax.errorbar(xi + dx, s['beta'], yerr=1.96 * s['se'], fmt='o', color=color,
+                            capsize=3, mfc=color if s['p'] < 0.05 else 'white')
+            if any((mg, c, (v, form)) in summary for c in ['learning', 'control']):
+                labels.append(f'{v}\n{form}')
+                xi += 1
+    ax.axhline(0, color='k', alpha=0.3)
+    ax.set_xticks(range(len(labels)))
+    ax.set_xticklabels(labels, rotation=60, ha='right', fontsize=8)
+    ax.set_title(mg)
+axes[0].set_ylabel(r'pooled $\beta$ ($\Delta A \rightarrow \Delta W$) ± 95% CI')
+axes[0].plot([], [], 'o', color='#e74c3c', label='learning')
+axes[0].plot([], [], 'o', color='#3498db', label='water control')
+axes[0].legend(fontsize=9)
+fig.suptitle('Fig. 4h with different Delta-correlation definitions (filled: p<0.05)',
+             fontweight='bold')
+plt.tight_layout()
+plt.savefig(os.path.join(RESULTS_DIR, 'fig4_dcorr_variants.png'), dpi=150, bbox_inches='tight')
+plt.close(fig)
+print("Figure saved.")
