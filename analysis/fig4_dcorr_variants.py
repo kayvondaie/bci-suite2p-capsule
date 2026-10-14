@@ -20,6 +20,9 @@
 #   dC    : sum_j (C1_ij - C0_ij) (W~0_j + W~1_j)/2 (correlation change only)
 #   CdW   : sum_j (C0_ij + C1_ij)/2 (W~1_j - W~0_j)   (correlation-weighted
 #           target change; paper = dC + CdW exactly)
+#   dCu   : mean_j (C1_ij - C0_ij) over responsive targets, unweighted, with
+#           the 3-factor target definition (< 10 um, AMP > 0.1 in both maps);
+#           no target-amplitude weights, so no target-change term at all
 # joint fits: dW ~ dC + CdW + target dW, to see which part of the paper
 # regressor carries the effect once the summed target change is regressed out.
 # Slopes give dC only (S_ij in place of C1 - C0, per unit session time).
@@ -136,7 +139,7 @@ def session_fit(mouse, session, condition):
         is_out[:] = False
 
     keys = [(v, form) for v, c in CV.items()
-            for form in (['paper', 'dC', 'CdW'] if c[0] == 'pair' else ['dC'])]
+            for form in (['paper', 'dC', 'CdW', 'dCu'] if c[0] == 'pair' else ['dC', 'dCu'])]
     rows = {k: [] for k in keys}
     y_list, c_list, n_used = [], [], 0
     for g in range(n_groups):
@@ -154,6 +157,8 @@ def session_fit(mouse, session, condition):
         w0 = np.nan_to_num(Wt[0][tg, g])
         w1 = np.nan_to_num(Wt[1][tg, g])
         wbar = (w0 + w1) / 2
+        tg3 = np.where((D[0][:, g] < 10) & (D[1][:, g] < 10) &
+                       (AMP[0][:, g] > amp_thr) & (AMP[1][:, g] > amp_thr))[0]
         y_list.append(dWt[nt, g])
         c_list.append(np.full(nt.size, np.nansum(dWt[tg, g])))
         for v, c in CV.items():
@@ -162,19 +167,29 @@ def session_fit(mouse, session, condition):
                 rows[v, 'paper'].append(C1 @ w1 - C0 @ w0)
                 rows[v, 'dC'].append((C1 - C0) @ wbar)
                 rows[v, 'CdW'].append(((C0 + C1) / 2) @ (w1 - w0))
+                dCu = (c[2][np.ix_(nt, tg3)] - c[1][np.ix_(nt, tg3)]).mean(axis=1)
             else:
                 rows[v, 'dC'].append(c[1][np.ix_(nt, tg)] @ wbar)
+                dCu = c[1][np.ix_(nt, tg3)].mean(axis=1)
+            rows[v, 'dCu'].append(dCu if tg3.size else np.full(nt.size, np.nan))
         n_used += 1
     if n_used == 0:
         raise RuntimeError('no valid groups')
-    y, c = zs(np.concatenate(y_list)), zs(np.concatenate(c_list))
+    y_raw, c_raw = np.concatenate(y_list), np.concatenate(c_list)
+    y, c = zs(y_raw), zs(c_raw)
     res = dict(mouse=mouse, session=session, condition=condition, n_groups=n_used,
-               n_pairs=len(y), fits={}, joint={})
+               n_pairs=len(y), fits={}, joint={}, raw={})
     for k in keys:
-        x = zs(np.concatenate(rows[k]))
-        b, t, p = ols(y, np.column_stack([x, c]))
-        res['fits'][k] = dict(beta=b[0], p=p[0],
-                              suff=_suff(y, np.column_stack([x, c])))
+        x_raw = np.concatenate(rows[k])
+        ok = np.isfinite(x_raw)
+        if ok.sum() < 20:
+            continue
+        yk, ck, x = zs(y_raw[ok]), zs(c_raw[ok]), zs(x_raw[ok])
+        b, t, p = ols(yk, np.column_stack([x, ck]))
+        res['fits'][k] = dict(beta=b[0], p=p[0], n=int(ok.sum()),
+                              suff=_suff(yk, np.column_stack([x, ck])))
+        if k[0] == 'cont_halves':
+            res['raw'][k] = dict(y=yk, x=x, c=ck)
     for v, cv in CV.items():
         if cv[0] != 'pair':
             continue
@@ -297,7 +312,7 @@ for mg, mice in MOUSE_GROUPS.items():
 
 print("\n================ learning - control, single-regressor fits (pooled) ================")
 for mg, mice in MOUSE_GROUPS.items():
-    for k in [(v, f) for v in ['cont_halves', 'cont_slope'] for f in ['paper', 'dC', 'CdW']]:
+    for k in [(v, f) for v in ['cont_halves', 'cont_slope'] for f in ['paper', 'dC', 'CdW', 'dCu']]:
         sl = [r['fits'][k]['suff'] for r in qc if r['condition'] == 'learning'
               and r['mouse'] in mice and k in r['fits']]
         sc = [r['fits'][k]['suff'] for r in qc if r['condition'] == 'control'
@@ -313,7 +328,7 @@ fig, axes = plt.subplots(1, 3, figsize=(17, 5.5), sharey=True)
 for ax, mg in zip(axes, MOUSE_GROUPS):
     labels, xi = [], 0
     for v in VARIANTS:
-        for form in ['paper', 'dC', 'CdW']:
+        for form in ['paper', 'dC', 'CdW', 'dCu']:
             for cond, color, dx in [('learning', '#e74c3c', -0.15), ('control', '#3498db', 0.15)]:
                 s = summary.get((mg, cond, (v, form)))
                 if s is None:
