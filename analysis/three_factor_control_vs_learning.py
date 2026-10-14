@@ -263,9 +263,12 @@ def session_fit(mouse, session, condition):
 
 
 all_results = []
-for condition, sessions in [('control', CONTROL_SESSIONS),
-                            ('learning', LEARNING_SESSIONS),
-                            ('learning_pseudo', LEARNING_SESSIONS)]:
+# CONDITIONS env var (comma-separated) restricts which conditions are run
+RUN_CONDITIONS = os.environ.get('CONDITIONS', 'control,learning,learning_pseudo').split(',')
+for condition, sessions in [(c, s) for c, s in [('control', CONTROL_SESSIONS),
+                                                ('learning', LEARNING_SESSIONS),
+                                                ('learning_pseudo', LEARNING_SESSIONS)]
+                            if c in RUN_CONDITIONS]:
     for mouse, session in sessions:
         if (mouse, session) in EXCLUDE:
             continue
@@ -323,8 +326,9 @@ def one_sample_p(v):
         return np.nan
 
 
-LEARNING_VARIANTS = {'learning': 'Learning (BCI trials)',
-                     'learning_pseudo': 'Learning (BCI pseudo-trials)'}
+LEARNING_VARIANTS = {k: v for k, v in {'learning': 'Learning (BCI trials)',
+                                        'learning_pseudo': 'Learning (BCI pseudo-trials)'}.items()
+                     if k in RUN_CONDITIONS}
 stats = {}
 for lv in LEARNING_VARIANTS:
     for mg, mice in MOUSE_GROUPS.items():

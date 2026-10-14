@@ -34,6 +34,8 @@ print(f"control        : {len(ss_c):2d} sess, {len(xc):6d} pairs, pooled r={r_c:
       f"sessions p<.05 & r>0: {sum(r['p_test'] < 0.05 and r['r_test'] > 0 for r in ss_c)}/{len(ss_c)}")
 for lv in ['learning', 'learning_pseudo']:
     ss_l, xl, yl = pooled(lv)
+    if not ss_l:
+        continue
     r_l, p_l = sps.pearsonr(xl, yl)
     x = np.concatenate([xc, xl])
     y = np.concatenate([yc, yl])
