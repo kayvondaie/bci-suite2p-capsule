@@ -13,6 +13,8 @@ qc = [r for r in res if r['n_groups'] >= MIN_GROUPS]
 
 def pooled(cond):
     ss = [r for r in qc if r['condition'] == cond]
+    if not ss:
+        return ss, None, None
     x = np.concatenate([r['Y_pred_all'] for r in ss])
     y = np.concatenate([r['Y_test_all'] for r in ss])
     return ss, x, y
