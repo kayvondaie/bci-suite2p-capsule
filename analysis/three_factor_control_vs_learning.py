@@ -98,6 +98,21 @@ TAG = '' if dist_nontarg_max == 1000 else f'_nt{int(dist_nontarg_max)}'
 # TEST_MAX: fit on all pairs, but score held-out predictions only on pairs
 # whose non-target is closer than TEST_MAX um to the stim site
 TEST_MAX = float(os.environ['TEST_MAX']) if os.environ.get('TEST_MAX') else None
+
+
+# SPONT_MAX_MIN env var: cap every spont epoch at this many minutes, identically
+# in water and learning sessions (pre: last N min, post: first N min, i.e. the
+# parts closest to the intervening BCI / water period)
+SPONT_MAX_MIN = float(os.environ['SPONT_MAX_MIN']) if os.environ.get('SPONT_MAX_MIN') else None
+
+
+def cap_epoch(Fs, fs, which):
+    if SPONT_MAX_MIN is None:
+        return Fs
+    n = int(round(SPONT_MAX_MIN * 60 * fs))
+    return Fs[:, -n:] if which == 0 else Fs[:, :n]
+if SPONT_MAX_MIN is not None:
+    TAG += f'_spont{SPONT_MAX_MIN:g}min'
 if TEST_MAX is not None:
     TAG += f'_test{int(TEST_MAX)}'
 amp0_thr = 0.1
@@ -169,8 +184,8 @@ def load_session(mouse, session, condition):
         fs = float(sh['metadata']['hRoiManager']['scanFrameRate'])
         bins = []
         with h5py.File(glob.glob(folder + 'data_main_*.h5')[0], 'r') as f:
-            for k in ['spont_pre', 'spont_post']:
-                Fs = np.asarray(f[k][:], dtype=float)
+            for ei, k in enumerate(['spont_pre', 'spont_post']):
+                Fs = cap_epoch(np.asarray(f[k][:], dtype=float), fs, ei)
                 F0 = np.nanpercentile(Fs, 10, axis=1, keepdims=True)
                 F0[F0 <= 0] = np.nan
                 bins.append(bin_pseudo_trials((Fs - F0) / F0, fs))
@@ -181,7 +196,8 @@ def load_session(mouse, session, condition):
         AMP, stimDist = compute_amp_from_photostim(mouse, data, folder)
         fs = 1.0 / float(data['dt_si'])
         bins = []
-        for Fs in load_learning_spont(folder):
+        for ei, Fs in enumerate(load_learning_spont(folder)):
+            Fs = cap_epoch(Fs, fs, ei)
             F0 = np.nanpercentile(Fs, 10, axis=1, keepdims=True)
             F0[F0 <= 0] = np.nan
             bins.append(bin_pseudo_trials((Fs - F0) / F0, fs))

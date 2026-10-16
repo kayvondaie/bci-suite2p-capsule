@@ -42,6 +42,19 @@ TRIAL_WIN = 10
 TRIAL_STEP = 5
 VARIANTS = ['cont_halves', 'cont_slope', 'trial_halves', 'trial_first40',
             'trial_slope', 'signal_halves', 'noise_halves', 'prepost']
+# SPONT_MAX_MIN env var: cap every spont epoch at this many minutes, identically
+# in water and learning sessions (pre: last N min, post: first N min, i.e. the
+# parts closest to the intervening BCI / water period)
+SPONT_MAX_MIN = float(os.environ['SPONT_MAX_MIN']) if os.environ.get('SPONT_MAX_MIN') else None
+
+
+def cap_epoch(Fs, fs, which):
+    if SPONT_MAX_MIN is None:
+        return Fs
+    n = int(round(SPONT_MAX_MIN * 60 * fs))
+    return Fs[:, -n:] if which == 0 else Fs[:, :n]
+TAG = '' if SPONT_MAX_MIN is None else f'_spont{SPONT_MAX_MIN:g}min'
+RUN_CONDITIONS = os.environ.get('CONDITIONS', 'learning,control,learning_spont').split(',')
 SPONT_FOLDER_PAIRS = [('suite2p_spont_pre', 'suite2p_spont_post'),
                       ('suite2p_spont', 'suite2p_spont2')]
 
@@ -71,7 +84,8 @@ def spont_epochs(mouse, session, condition):
         if raw is None:
             raise FileNotFoundError(f'no spont pre/post pair in {folder}')
     out = []
-    for Fs in raw:
+    for ei, Fs in enumerate(raw):
+        Fs = cap_epoch(Fs, fs, ei)
         F0 = np.nanpercentile(Fs, 10, axis=1, keepdims=True)
         F0[F0 <= 0] = np.nan
         out.append(np.nan_to_num((Fs - F0) / F0, nan=0.0))
@@ -250,8 +264,10 @@ def _suff(y, A):
 
 
 all_results = []
-for condition, sessions in [('learning', LEARNING_SESSIONS), ('control', CONTROL_SESSIONS),
-                            ('learning_spont', LEARNING_SESSIONS)]:
+for condition, sessions in [(c, s) for c, s in [('learning', LEARNING_SESSIONS),
+                                                ('control', CONTROL_SESSIONS),
+                                                ('learning_spont', LEARNING_SESSIONS)]
+                            if c in RUN_CONDITIONS]:
     for mouse, session in sessions:
         if (mouse, session) in EXCLUDE:
             continue
@@ -268,7 +284,7 @@ for condition, sessions in [('learning', LEARNING_SESSIONS), ('control', CONTROL
             print(f"  FAILED: {e}")
             traceback.print_exc()
 
-np.save(os.path.join(RESULTS_DIR, 'fig4_dcorr_variants.npy'), all_results, allow_pickle=True)
+np.save(os.path.join(RESULTS_DIR, f'fig4_dcorr_variants{TAG}.npy'), all_results, allow_pickle=True)
 print("Saved.")
 
 #%% ============================================================================
@@ -398,6 +414,6 @@ axes[0].legend(fontsize=9)
 fig.suptitle('Fig. 4h with different Delta-correlation definitions (filled: p<0.05)',
              fontweight='bold')
 plt.tight_layout()
-plt.savefig(os.path.join(RESULTS_DIR, 'fig4_dcorr_variants.png'), dpi=150, bbox_inches='tight')
+plt.savefig(os.path.join(RESULTS_DIR, f'fig4_dcorr_variants{TAG}.png'), dpi=150, bbox_inches='tight')
 plt.close(fig)
 print("Figure saved.")
