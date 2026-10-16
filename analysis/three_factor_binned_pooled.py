@@ -17,8 +17,13 @@ res = np.load('/root/capsule/results/three_factor_control_vs_learning'
 out = {}
 for cond in conds:
     ss = [r for r in res if r['condition'] == cond and r['n_groups'] >= MIN_GROUPS]
-    x = np.concatenate([sps.norm.ppf((sps.rankdata(r['Y_pred_all']) - 0.5) / len(r['Y_pred_all']))
-                        for r in ss])
+    if os.environ.get('X_MODE', 'ranknormal') == 'z':
+        # predictions z-scored within session (no ranks)
+        x = np.concatenate([(r['Y_pred_all'] - r['Y_pred_all'].mean()) / r['Y_pred_all'].std()
+                            for r in ss])
+    else:
+        x = np.concatenate([sps.norm.ppf((sps.rankdata(r['Y_pred_all']) - 0.5) / len(r['Y_pred_all']))
+                            for r in ss])
     y = np.concatenate([r['Y_test_all'] for r in ss])
     xr = np.concatenate([r['Y_pred_all'] for r in ss])
     r_p, p_p = sps.pearsonr(xr, y)
