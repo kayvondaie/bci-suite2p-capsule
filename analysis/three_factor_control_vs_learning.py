@@ -104,6 +104,20 @@ TEST_MAX = float(os.environ['TEST_MAX']) if os.environ.get('TEST_MAX') else None
 # in water and learning sessions (pre: last N min, post: first N min, i.e. the
 # parts closest to the intervening BCI / water period)
 SPONT_MAX_MIN = float(os.environ['SPONT_MAX_MIN']) if os.environ.get('SPONT_MAX_MIN') else None
+# SPONT_DFF: 'sd' (default) = data-dict convention of create_BCI_F,
+# (F - std(F)) / std(F) per cell and epoch (robust to near-zero baselines);
+# 'p10' = (F - F0) / F0 with F0 = 10th percentile (blows up for low-baseline cells)
+SPONT_DFF = os.environ.get('SPONT_DFF', 'sd')
+
+
+def spont_dff(Fs):
+    if SPONT_DFF == 'p10':
+        F0 = np.nanpercentile(Fs, 10, axis=1, keepdims=True)
+        F0[F0 <= 0] = np.nan
+        return (Fs - F0) / F0
+    sd = np.nanstd(Fs, axis=1, keepdims=True)
+    sd[~(sd > 0)] = np.nan
+    return (Fs - sd) / sd
 
 
 def cap_epoch(Fs, fs, which):
@@ -281,9 +295,7 @@ def load_session(mouse, session, condition):
         with h5py.File(glob.glob(folder + 'data_main_*.h5')[0], 'r') as f:
             for ei, k in enumerate(['spont_pre', 'spont_post']):
                 Fs = cap_epoch(np.asarray(f[k][:], dtype=float), fs, ei)
-                F0 = np.nanpercentile(Fs, 10, axis=1, keepdims=True)
-                F0[F0 <= 0] = np.nan
-                bins.append(bin_pseudo_trials((Fs - F0) / F0, fs))
+                bins.append(bin_pseudo_trials(spont_dff(Fs), fs))
         epoch_act = np.nan_to_num(np.concatenate(bins, axis=1), nan=0.0)
         LAST_N_PRE[0] = bins[0].shape[1]
     elif condition == 'learning_spont':
@@ -295,9 +307,7 @@ def load_session(mouse, session, condition):
         bins = []
         for ei, Fs in enumerate(load_learning_spont(folder)):
             Fs = cap_epoch(Fs, fs, ei)
-            F0 = np.nanpercentile(Fs, 10, axis=1, keepdims=True)
-            F0[F0 <= 0] = np.nan
-            bins.append(bin_pseudo_trials((Fs - F0) / F0, fs))
+            bins.append(bin_pseudo_trials(spont_dff(Fs), fs))
         epoch_act = np.nan_to_num(np.concatenate(bins, axis=1), nan=0.0)
         LAST_N_PRE[0] = bins[0].shape[1]
     elif condition == 'learning_pseudo':
@@ -436,6 +446,8 @@ def session_fit(mouse, session, condition):
         Y_pred_all.append(pred_te)
         dist_test_all.append(pair_dist[test_idx])
         beta_folds.append(beta)
+    _yt, _yp = np.concatenate(Y_test_all), np.concatenate(Y_pred_all)
+    r_pool, p_pool = pearsonr(_yp, _yt) if np.std(_yp) > 0 else (0.0, 1.0)
     diag = None
     if DIAG:
         groups = np.concatenate(grp_list)
@@ -470,8 +482,12 @@ def session_fit(mouse, session, condition):
         'diag': diag,
         'mouse': mouse, 'session': session, 'condition': condition,
         'n_groups': n_groups, 'n_pairs': n_pairs, 'n_trials': trl, 'n_windows': n_wins, 'r_y_w0': r_y_w0,
-        'r_test': np.mean(r_te_f), 'r_train': np.mean(r_tr_f),
-        'p_test': np.exp(np.mean(np.log(np.clip(p_te_f, 1e-300, 1.0)))),
+        # session r / p from pooled out-of-fold predictions (as in
+        # three_factor_variance_explained_figure.py); fold-mean r and geometric-
+        # mean fold p kept for reference
+        'r_test': r_pool, 'p_test': p_pool, 'r_train': np.mean(r_tr_f),
+        'r_test_foldmean': np.mean(r_te_f),
+        'p_test_geo': np.exp(np.mean(np.log(np.clip(p_te_f, 1e-300, 1.0)))),
         'Y_test_all': np.concatenate(Y_test_all),
         'Y_pred_all': np.concatenate(Y_pred_all),
         'dist_test_all': np.concatenate(dist_test_all),
