@@ -11,6 +11,7 @@ from scipy import stats as sps
 MIN_GROUPS = 10
 COL = 5
 N_BOOT = 1000
+N_BOOT_SESS = 5000
 tag = os.environ.get('TAG', '')
 conds = os.environ.get('CONDS', 'control,learning_spont').split(',')
 res = np.load(f'/root/capsule/results/three_factor_control_vs_learning{tag}.npy', allow_pickle=True)
@@ -56,4 +57,31 @@ if len(conds) == 2:
     out['boot'] = dict(diff=float(obs), ci=ci.tolist(), p=float(p))
     print(f'{conds[1]} - {conds[0]}: r diff={obs:+.4f}, 95% CI [{ci[0]:+.4f}, {ci[1]:+.4f}], '
           f'pair bootstrap p={p:.3g}')
+
+    # Session bootstrap: resample whole sessions with replacement within each
+    # condition, recompute the pooled r from the resampled sessions' pairs
+    def sums(r_):
+        x, y = r_['Y_pred_all'], r_['Y_test_all']
+        return np.array([len(x), x.sum(), y.sum(), (x * y).sum(), (x * x).sum(), (y * y).sum()])
+
+    def pooled_r(S):
+        n, sx, sy, sxy, sxx, syy = S.sum(axis=0)
+        return (sxy - sx * sy / n) / np.sqrt((sxx - sx ** 2 / n) * (syy - sy ** 2 / n))
+
+    S = {c: np.array([sums(r_) for r_ in res if r_['condition'] == c and r_['n_groups'] >= MIN_GROUPS])
+         for c in conds}
+    bs = {c: np.array([pooled_r(S[c][rng.integers(0, len(S[c]), len(S[c]))])
+                       for _ in range(N_BOOT_SESS)]) for c in conds}
+    d_s = bs[conds[1]] - bs[conds[0]]
+    ci_s = np.percentile(d_s, [2.5, 97.5])
+    p_s = max(2 * min(np.mean(d_s <= 0), np.mean(d_s >= 0)), 1 / N_BOOT_SESS)
+    out['boot_session'] = dict(diff=float(obs), ci=ci_s.tolist(), p=float(p_s),
+                               ci_by_cond={c: np.percentile(bs[c], [2.5, 97.5]).tolist() for c in conds},
+                               p_gt0_by_cond={c: float(max(2 * np.mean(bs[c] <= 0), 1 / N_BOOT_SESS))
+                                              for c in conds})
+    for c in conds:
+        print(f'  session bootstrap {c:15s}: r 95% CI [{np.percentile(bs[c], 2.5):+.4f}, '
+              f'{np.percentile(bs[c], 97.5):+.4f}], fraction r<=0 = {np.mean(bs[c] <= 0):.3f}')
+    print(f'{conds[1]} - {conds[0]}: r diff={obs:+.4f}, session bootstrap 95% CI '
+          f'[{ci_s[0]:+.4f}, {ci_s[1]:+.4f}], p={p_s:.3g}')
 print('JSON' + json.dumps(out))
