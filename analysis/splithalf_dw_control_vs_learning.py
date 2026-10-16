@@ -28,8 +28,10 @@
 # Robustness: each cell's per-repeat responses are divided by that cell's SD
 # across all repeats of the map (noise-normalised response, cf. paper-1 W~)
 # and clipped at +/- CLIP_SD, identically in both conditions. Sessions whose
-# pair-specific W split-half r < MIN_PAIR_R_W (no measurable pair-level
-# connectivity) are left out of the pooled stats.
+# close-pair (< 100 um) pair-specific W split-half r < MIN_PAIR_R_W (no
+# measurable pair-level connectivity) are left out of the pooled stats. (The
+# all-pair r is diluted by thousands of unconnected far pairs, so it is not
+# used for QC.)
 #
 # Stats (pooled, no resampling): per-unit products of the normalised half
 # estimates, pooled over all sessions of a condition; mean ± SE, z-test vs 0
@@ -46,7 +48,7 @@ NONTARG_FIT = (30, 1000)      # pairs used for the two-way decomposition
 NONTARG_CLOSE = 100           # pair-specific component also reported < 100 um
 MIN_HALF_REPEATS = 5
 CLIP_SD = 5
-MIN_PAIR_R_W = 0.05
+MIN_PAIR_R_W = 0.1    # QC on close-pair (< NONTARG_CLOSE) W split-half r
 N_ITER = 30
 
 #%% ============================================================================
@@ -215,9 +217,9 @@ print("Saved.")
 COMPONENTS = ['total', 'row', 'col', 'pair', 'pair_close']
 for cond in ['control', 'learning']:
     rr = [r for r in all_results if r['condition'] == cond]
-    ok = [r for r in rr if r.get('r_pair_W', 0) >= MIN_PAIR_R_W]
+    ok = [r for r in rr if r.get('r_pair_W_close', 0) >= MIN_PAIR_R_W]
     print(f"QC {cond}: {len(ok)}/{len(rr)} sessions with pair-specific W split-half r >= "
-          f"{MIN_PAIR_R_W}: " + ', '.join(f"{r['mouse']} {r['session']} ({r['r_pair_W']:.2f})" for r in ok))
+          f"{MIN_PAIR_R_W} (< {NONTARG_CLOSE} um): " + ', '.join(f"{r['mouse']} {r['session']} ({r['r_pair_W_close']:.2f})" for r in ok))
 summary = {}
 print("\n======== reliable change / reliable connectivity (pooled products) ========")
 for mg, mice in MOUSE_GROUPS.items():
@@ -226,7 +228,7 @@ for mg, mice in MOUSE_GROUPS.items():
         st = {}
         for cond in ['control', 'learning']:
             ss = [r for r in all_results if r['condition'] == cond and r['mouse'] in mice
-                  and k in r['prod'] and r.get('r_pair_W', 0) >= MIN_PAIR_R_W]
+                  and k in r['prod'] and r.get('r_pair_W_close', 0) >= MIN_PAIR_R_W]
             if not ss:
                 continue
             x = np.concatenate([r['prod'][k] for r in ss])
@@ -260,7 +262,7 @@ for ax, k in zip(axes, COMPONENTS):
         ax.bar(xi, st[cond]['m'], yerr=st[cond]['se'], color=color, alpha=0.7, capsize=4)
         ratios = [r['rel'][k]['ratio'] for r in all_results
                   if r['condition'] == cond and k in r['prod']
-                  and r.get('r_pair_W', 0) >= MIN_PAIR_R_W]
+                  and r.get('r_pair_W_close', 0) >= MIN_PAIR_R_W]
         rng = np.random.default_rng(0)
         ax.plot(xi + rng.uniform(-0.15, 0.15, len(ratios)), ratios, 'k.', alpha=0.5)
     ax.axhline(0, color='k', lw=0.8)
