@@ -160,10 +160,18 @@ def session_splithalf(mouse, session, condition):
         if rW > 0:
             u, v = comp['dW'][k]
             out['prod'][k] = (u - u.mean()) * (v - v.mean()) / rW
+    # close pairs: residuals from the all-pair decomposition, normalised by the
+    # close pairs' own reliable pair-specific W variance
+    uc, vc = (x[close] for x in comp['dW']['pair'])
+    wc = [x[close] for x in comp['W']['pair']]
+    rWc = rel_cov(*wc) if close.sum() > 20 else np.nan
+    rDc = rel_cov(uc, vc) if close.sum() > 20 else np.nan
+    out['rel']['pair_close'] = dict(dW=rDc, W=rWc, ratio=rDc / rWc if rWc > 0 else np.nan)
+    if rWc > 0:
+        out['prod']['pair_close'] = (uc - uc.mean()) * (vc - vc.mean()) / rWc
+        out['r_pair_W_close'] = float(np.corrcoef(*wc)[0, 1])
     if out['rel']['pair']['W'] > 0:
         u, v = comp['dW']['pair']
-        p = (u - u.mean()) * (v - v.mean()) / out['rel']['pair']['W']
-        out['prod']['pair_close'] = p[close]
         # split-half correlation of the pair-specific change itself
         out['r_pair'] = float(np.corrcoef(u, v)[0, 1])
         out['r_pair_W'] = float(np.corrcoef(*comp['W']['pair'])[0, 1])
@@ -181,7 +189,7 @@ for condition, sessions in [('control', CONTROL_SESSIONS), ('learning', LEARNING
             all_results.append(r)
             print(f"  {r['n_pairs']} pairs ({r['n_close']} < {NONTARG_CLOSE} um), "
                   f"{r['n_cells']} cells, {r['n_groups']} groups")
-            for k in ['total', 'row', 'col', 'pair']:
+            for k in ['total', 'row', 'col', 'pair', 'pair_close']:
                 q = r['rel'][k]
                 print(f"    {k:5s}: reliable var dW={q['dW']:+.3e}  W={q['W']:+.3e}  "
                       f"dW/W={q['ratio']:+.3f}")
@@ -219,7 +227,7 @@ for mg, mice in MOUSE_GROUPS.items():
                 continue
             x = np.concatenate([r['prod'][k] for r in ss])
             m, se = x.mean(), x.std(ddof=1) / np.sqrt(len(x))
-            ratios = [r['rel'][k.replace('_close', '')]['ratio'] for r in ss]
+            ratios = [r['rel'][k]['ratio'] for r in ss]
             st[cond] = dict(m=m, se=se, n=len(x), n_sess=len(ss),
                             n_pos=int(np.sum(np.array(ratios) > 0)),
                             med_ratio=float(np.nanmedian(ratios)))
@@ -246,7 +254,7 @@ for ax, k in zip(axes, COMPONENTS):
         if cond not in st:
             continue
         ax.bar(xi, st[cond]['m'], yerr=st[cond]['se'], color=color, alpha=0.7, capsize=4)
-        ratios = [r['rel'][k.replace('_close', '')]['ratio'] for r in all_results
+        ratios = [r['rel'][k]['ratio'] for r in all_results
                   if r['condition'] == cond and k in r['prod']
                   and r.get('r_pair_W', 0) >= MIN_PAIR_R_W]
         rng = np.random.default_rng(0)
