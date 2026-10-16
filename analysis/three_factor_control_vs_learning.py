@@ -412,7 +412,7 @@ def session_fit(mouse, session, condition):
     # ---- Cross-validated pinv fit ----
     cv = KFold(n_splits=n_cv_folds, shuffle=True, random_state=42)
     r_te_f, r_tr_f, p_te_f = [], [], []
-    Y_test_all, Y_pred_all = [], []
+    Y_test_all, Y_pred_all, dist_test_all = [], [], []
     beta_folds = []
     for train_idx, test_idx in cv.split(X):
         Y_tr, Y_te = Y[train_idx], Y[test_idx]
@@ -434,6 +434,7 @@ def session_fit(mouse, session, condition):
         p_te_f.append(p)
         Y_test_all.append((Y_te - mu_y) / sig_y)
         Y_pred_all.append(pred_te)
+        dist_test_all.append(pair_dist[test_idx])
         beta_folds.append(beta)
     diag = None
     if DIAG:
@@ -473,6 +474,7 @@ def session_fit(mouse, session, condition):
         'p_test': np.exp(np.mean(np.log(np.clip(p_te_f, 1e-300, 1.0)))),
         'Y_test_all': np.concatenate(Y_test_all),
         'Y_pred_all': np.concatenate(Y_pred_all),
+        'dist_test_all': np.concatenate(dist_test_all),
     }
 
 
