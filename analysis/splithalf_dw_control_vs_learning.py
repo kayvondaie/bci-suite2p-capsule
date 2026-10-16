@@ -25,6 +25,15 @@
 # the mean map W = (W0 + W1)/2, i.e. "reliable change relative to reliable
 # connectivity".
 #
+# Direct-response control ('_dc' components): before the decomposition, each
+# half's dW is regressed (within session, OLS) on the change in the group's
+# direct target responses measured in the OTHER half (independent noise):
+#   sum_j dT_jg  and  sum_j dT_jg exp(-d_ij / lam), lam = 25, 50, 100 um,
+# j over the group's responsive targets, d_ij = non-target-to-target distance.
+# The distance-weighted terms capture target-specific changes in stimulation
+# (e.g. hologram / plane shifts after remounting) that a group-level control
+# cannot.
+#
 # Robustness: each cell's per-repeat responses are divided by that cell's SD
 # across all repeats of the map (noise-normalised response, cf. paper-1 W~)
 # and clipped at +/- CLIP_SD, identically in both conditions. Sessions whose
@@ -48,6 +57,7 @@ NONTARG_FIT = (30, 1000)      # pairs used for the two-way decomposition
 NONTARG_CLOSE = 100           # pair-specific component also reported < 100 um
 MIN_HALF_REPEATS = 5
 CLIP_SD = 5
+DC_LAMBDAS = [25, 50, 100]
 MIN_PAIR_R_W = 0.1    # QC on close-pair (< NONTARG_CLOSE) W split-half r
 N_ITER = 30
 
@@ -72,6 +82,8 @@ def load_maps(mouse, session, condition):
     k = np.nanmedian(stimDist / np.where(data['photostim2']['stimDist'] == 0, np.nan,
                                          data['photostim2']['stimDist']))
     D = [data['photostim']['stimDist'] * k, data['photostim2']['stimDist'] * k]
+    with h5py.File(ps_file(folder, 'photostim'), 'r') as f:
+        xy = np.column_stack([np.ravel(f['centroidX'][:]), np.ravel(f['centroidY'][:])]) * k
     halves = []                                   # [map][half] -> cells x groups
     for pi, pkey in enumerate(['photostim', 'photostim2']):
         r, s, _ = repeat_responses(ps_file(folder, pkey), mouse, dt, D[pi])
@@ -89,7 +101,7 @@ def load_maps(mouse, session, condition):
                 if ok.any():
                     H[h, ok, g] = np.nanmean(R[ok], axis=1)
         halves.append(H)
-    return AMP, D, halves
+    return AMP, D, halves, xy
 
 
 #%% ============================================================================
@@ -114,7 +126,7 @@ def rel_cov(u, v):
 
 
 def session_splithalf(mouse, session, condition):
-    AMP, D, H = load_maps(mouse, session, condition)
+    AMP, D, H, xy = load_maps(mouse, session, condition)
     n_cells, n_groups = D[0].shape
     amp_avg = (AMP[0] + AMP[1]) / 2
     amp_avg[np.minimum(D[0], D[1]) < NONTARG_FIT[0]] = np.nan
@@ -127,9 +139,11 @@ def session_splithalf(mouse, session, condition):
     M = (dmin > NONTARG_FIT[0]) & (dmax < NONTARG_FIT[1]) & ~is_out[:, None]
     # Outliers carry no opsin, so they are never real targets: they are left
     # out of the responsive-target set, but their presence does not drop a group
+    targets = {}
     for g in range(n_groups):
         resp_t = np.where((D[0][:, g] < 10) & (D[1][:, g] < 10) &
                           (AMP[0][:, g] > amp_thr) & (AMP[1][:, g] > amp_thr) & ~is_out)[0]
+        targets[g] = resp_t
         if resp_t.size == 0:
             M[:, g] = False
     for X in [H[0][0], H[0][1], H[1][0], H[1][1]]:
@@ -142,8 +156,37 @@ def session_splithalf(mouse, session, condition):
         raise RuntimeError(f'only {M.sum()} pairs')
     rows, cols = M.any(axis=1), M.any(axis=0)
 
+    # ---- direct-response control ----
+    dWh = [H[1][h] - H[0][h] for h in range(2)]
+    dT = [np.nan_to_num(d) for d in dWh]          # target entries of dW = direct change
+    dcc = np.sqrt(((xy[:, None, :] - xy[None, :, :]) ** 2).sum(axis=2))
+    dWdc = []
+    for h in range(2):
+        o = 1 - h
+        preds = [np.zeros((n_cells, n_groups)) for _ in range(1 + len(DC_LAMBDAS))]
+        for g in range(n_groups):
+            T = targets[g]
+            if T.size == 0:
+                continue
+            dt = dT[o][T, g]
+            preds[0][:, g] = dt.sum()
+            for li, lam in enumerate(DC_LAMBDAS):
+                preds[1 + li][:, g] = np.exp(-dcc[:, T] / lam) @ dt
+        A = np.column_stack([np.ones(M.sum())] + [P[M] for P in preds])
+        y = dWh[h][M]
+        beta, *_ = np.linalg.lstsq(A, y, rcond=None)
+        R = np.full_like(dWh[h], np.nan)
+        R[M] = y - A @ beta
+        dWdc.append(R)
+    # direct-response stability: target responses, map 0 vs map 1 (halves averaged)
+    tg_idx = [(T, g) for g, T in targets.items() if T.size and M[:, g].any()]
+    t0 = np.concatenate([np.nanmean([H[0][h][T, g] for h in range(2)], axis=0) for T, g in tg_idx])
+    t1 = np.concatenate([np.nanmean([H[1][h][T, g] for h in range(2)], axis=0) for T, g in tg_idx])
+    okt = np.isfinite(t0) & np.isfinite(t1)
+    direct_r = float(np.corrcoef(t0[okt], t1[okt])[0, 1]) if okt.sum() > 3 else np.nan
+
     comp = {}
-    for name, Xh in [('dW', [H[1][h] - H[0][h] for h in range(2)]),
+    for name, Xh in [('dW', dWh), ('dWdc', dWdc),
                      ('W', [(H[1][h] + H[0][h]) / 2 for h in range(2)])]:
         fits = [two_way(Xh[h], M) for h in range(2)]
         comp[name] = dict(
@@ -155,25 +198,27 @@ def session_splithalf(mouse, session, condition):
 
     out = dict(mouse=mouse, session=session, condition=condition,
                n_pairs=int(M.sum()), n_cells=int(rows.sum()), n_groups=int(cols.sum()),
-               n_close=int(close.sum()), rel={}, prod={})
-    for k in ['total', 'row', 'col', 'pair']:
-        rW = rel_cov(*comp['W'][k])
-        rD = rel_cov(*comp['dW'][k])
-        out['rel'][k] = dict(dW=rD, W=rW, ratio=rD / rW if rW > 0 else np.nan)
-        # normalised per-unit products for pooling: mean of products = ratio
-        if rW > 0:
-            u, v = comp['dW'][k]
-            out['prod'][k] = (u - u.mean()) * (v - v.mean()) / rW
-    # close pairs: residuals from the all-pair decomposition, normalised by the
-    # close pairs' own reliable pair-specific W variance
-    uc, vc = (x[close] for x in comp['dW']['pair'])
-    wc = [x[close] for x in comp['W']['pair']]
-    rWc = rel_cov(*wc) if close.sum() > 20 else np.nan
-    rDc = rel_cov(uc, vc) if close.sum() > 20 else np.nan
-    out['rel']['pair_close'] = dict(dW=rDc, W=rWc, ratio=rDc / rWc if rWc > 0 else np.nan)
-    if rWc > 0:
-        out['prod']['pair_close'] = (uc - uc.mean()) * (vc - vc.mean()) / rWc
-        out['r_pair_W_close'] = float(np.corrcoef(*wc)[0, 1])
+               n_close=int(close.sum()), rel={}, prod={}, direct_r=direct_r,
+               n_targets=int(okt.sum()))
+    for src, sfx in [('dW', ''), ('dWdc', '_dc')]:
+        for k in ['total', 'row', 'col', 'pair']:
+            rW = rel_cov(*comp['W'][k])
+            rD = rel_cov(*comp[src][k])
+            out['rel'][k + sfx] = dict(dW=rD, W=rW, ratio=rD / rW if rW > 0 else np.nan)
+            # normalised per-unit products for pooling: mean of products = ratio
+            if rW > 0:
+                u, v = comp[src][k]
+                out['prod'][k + sfx] = (u - u.mean()) * (v - v.mean()) / rW
+        # close pairs: residuals from the all-pair decomposition, normalised by
+        # the close pairs' own reliable pair-specific W variance
+        uc, vc = (x[close] for x in comp[src]['pair'])
+        wc = [x[close] for x in comp['W']['pair']]
+        rWc = rel_cov(*wc) if close.sum() > 20 else np.nan
+        rDc = rel_cov(uc, vc) if close.sum() > 20 else np.nan
+        out['rel']['pair_close' + sfx] = dict(dW=rDc, W=rWc, ratio=rDc / rWc if rWc > 0 else np.nan)
+        if rWc > 0:
+            out['prod']['pair_close' + sfx] = (uc - uc.mean()) * (vc - vc.mean()) / rWc
+            out['r_pair_W_close'] = float(np.corrcoef(*wc)[0, 1])
     if out['rel']['pair']['W'] > 0:
         u, v = comp['dW']['pair']
         # split-half correlation of the pair-specific change itself
@@ -193,7 +238,9 @@ for condition, sessions in [('control', CONTROL_SESSIONS), ('learning', LEARNING
             all_results.append(r)
             print(f"  {r['n_pairs']} pairs ({r['n_close']} < {NONTARG_CLOSE} um), "
                   f"{r['n_cells']} cells, {r['n_groups']} groups")
-            for k in ['total', 'row', 'col', 'pair', 'pair_close']:
+            print(f"    direct-response stability r(map0, map1) = {r['direct_r']:+.3f} "
+                  f"({r['n_targets']} target entries)")
+            for k in ['total', 'row', 'col', 'pair', 'pair_close', 'pair_dc', 'pair_close_dc']:
                 q = r['rel'][k]
                 print(f"    {k:5s}: reliable var dW={q['dW']:+.3e}  W={q['W']:+.3e}  "
                       f"dW/W={q['ratio']:+.3f}")
@@ -214,7 +261,12 @@ print("Saved.")
 #%% ============================================================================
 # CELL 4: Pooled stats
 # ============================================================================
-COMPONENTS = ['total', 'row', 'col', 'pair', 'pair_close']
+COMPONENTS = ['total', 'row', 'col', 'pair', 'pair_close',
+              'total_dc', 'row_dc', 'col_dc', 'pair_dc', 'pair_close_dc']
+for cond in ['control', 'learning']:
+    v = [r['direct_r'] for r in all_results if r['condition'] == cond]
+    print(f"direct-response stability {cond}: median r = {np.nanmedian(v):.3f} "
+          f"(range {np.nanmin(v):.2f} to {np.nanmax(v):.2f}), {len(v)} sessions")
 for cond in ['control', 'learning']:
     rr = [r for r in all_results if r['condition'] == cond]
     ok = [r for r in rr if r.get('r_pair_W_close', 0) >= MIN_PAIR_R_W]
@@ -251,10 +303,11 @@ for mg, mice in MOUSE_GROUPS.items():
 #%% ============================================================================
 # CELL 5: Figure
 # ============================================================================
-fig, axes = plt.subplots(1, len(COMPONENTS), figsize=(16, 4), sharey=False)
+FIG_COMPONENTS = ['total', 'row', 'pair_close', 'total_dc', 'row_dc', 'pair_close_dc']
+fig, axes = plt.subplots(1, len(FIG_COMPONENTS), figsize=(19, 4), sharey=False)
 labels = {'total': 'total', 'row': 'postsynaptic\ncell', 'col': 'stim group',
           'pair': 'pair-specific', 'pair_close': 'pair-specific\n< 100 um'}
-for ax, k in zip(axes, COMPONENTS):
+for ax, k in zip(axes, FIG_COMPONENTS):
     st = summary.get(('combined', k), {})
     for xi, (cond, color) in enumerate([('control', '#3498db'), ('learning', '#e74c3c')]):
         if cond not in st:
@@ -268,7 +321,7 @@ for ax, k in zip(axes, COMPONENTS):
     ax.axhline(0, color='k', lw=0.8)
     ax.set_xticks([0, 1])
     ax.set_xticklabels(['control', 'learning'])
-    ax.set_title(f"{labels[k]}\np={st.get('p_diff', np.nan):.2g}")
+    ax.set_title(f"{labels[k.replace('_dc', '')]}{' (direct ctrl)' if k.endswith('_dc') else ''}\np={st.get('p_diff', np.nan):.2g}")
 axes[0].set_ylabel('reliable dW variance / reliable W variance')
 fig.suptitle('Split-half reliable connectivity change, all mice pooled (bars: pooled mean ± SE; '
              'dots: sessions)', fontweight='bold')
