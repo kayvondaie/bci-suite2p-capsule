@@ -34,7 +34,18 @@
 # (e.g. hologram / plane shifts after remounting) that a group-level control
 # cannot.
 #
-# Robustness: each cell's per-repeat responses are divided by that cell's SD
+# Photostim response definition (PS_DEF env var):
+#   'paper' (default): paper-1 Methods. Repeat response = <F>_after - <F>_before
+#       on Fstim (per-repeat dF/F; raw per-repeat F was not saved, so each repeat
+#       is normalised by its own pre-stim baseline instead of the repeat-averaged
+#       b_ig), 300 ms after / 200 ms before the stim for every mouse.
+#       W~ = mu / sigma, dW~ = (mu1 - mu0) / sqrt(sigma0^2 + sigma1^2); mu per
+#       half (>= 5 repeats), sigma from all of a map's repeats (>= 10).
+#       No per-cell normalisation or clipping.
+#   'old': mean dF/F per half, windows of compute_amp_from_photostim (0.4 s,
+#       0.5 s for BCI103), per-cell SD normalisation + clipping (below).
+#
+# Robustness (PS_DEF='old' only): each cell's per-repeat responses are divided by that cell's SD
 # across all repeats of the map (noise-normalised response, cf. paper-1 W~)
 # and clipped at +/- CLIP_SD, identically in both conditions. Sessions whose
 # close-pair (< 100 um) pair-specific W split-half r < MIN_PAIR_R_W (no
@@ -56,6 +67,8 @@ exec(_code[:_code.index('# CELL 4: Per-session regressors and fits')])
 NONTARG_FIT = (30, 1000)      # pairs used for the two-way decomposition
 NONTARG_CLOSE = 100           # pair-specific component also reported < 100 um
 MIN_HALF_REPEATS = 5
+PS_DEF = os.environ.get('PS_DEF', 'paper')
+PAPER_AFTER_S, PAPER_BEFORE_S = 0.3, 0.2
 CLIP_SD = 5
 DC_LAMBDAS = [25, 50, 100]
 MIN_PAIR_R_W = 0.1    # QC on close-pair (< NONTARG_CLOSE) W split-half r
@@ -64,6 +77,50 @@ N_ITER = 30
 #%% ============================================================================
 # CELL 2: Loading (photostim only)
 # ============================================================================
+def repeat_responses_paper(path, dt, stimDist_um):
+    """Per-repeat responses with paper-1 windows (300 ms after, 200 ms before);
+    artifact detection, seq alignment and previous-target masking as in
+    repeat_responses."""
+    with h5py.File(path, 'r') as f:
+        favg_raw = f['favg_raw'][:]
+        seq = np.asarray(f['seq'][:]).astype(int).ravel() - 1
+        artifact = np.nanmean(np.nanmean(favg_raw, axis=2), axis=1)
+        artifact = artifact - np.nanmean(artifact[0:4])
+        artifact = np.where(artifact > 0.5)[0]
+        artifact = artifact[artifact < 40]
+        if artifact.size == 0:
+            raise RuntimeError(f'no stim artifact in {os.path.basename(path)}')
+        n_after = max(1, int(round(PAPER_AFTER_S / dt)))
+        n_before = max(1, int(round(PAPER_BEFORE_S / dt)))
+        pre = (max(0, int(artifact[0] - 2 - n_before)), int(artifact[0] - 2))
+        post = (int(artifact[-1] + 2), int(artifact[-1] + 2 + n_after))
+        win = f['Fstim'][pre[0]:post[1], :, :]
+    resp_all = (np.nanmean(win[post[0] - pre[0]:], axis=0) -
+                np.nanmean(win[:pre[1] - pre[0]], axis=0))
+    n_groups = stimDist_um.shape[1]
+    nearest = np.argmin(stimDist_um, axis=0)
+    best, best_sr = -np.inf, (seq, resp_all)
+    for off in range(-10, 11):
+        if off > 0:
+            s_, r_ = seq[:-off], resp_all[:, off:]
+        elif off < 0:
+            s_, r_ = seq[-off:], resp_all[:, :off]
+        else:
+            s_, r_ = seq, resp_all
+        n = min(len(s_), r_.shape[1])
+        s_, r_ = s_[:n], r_[:, :n]
+        v = np.nanmean([np.nanmean(r_[nearest[g], s_ == g]) for g in range(n_groups)
+                        if np.any(s_ == g)])
+        if v > best:
+            best, best_sr = v, (s_, r_)
+    s_, r_ = best_sr
+    r_ = r_.copy()
+    for t in range(1, len(s_)):
+        if 0 <= s_[t - 1] < n_groups:
+            r_[stimDist_um[:, s_[t - 1]] < TARGET_UM, t] = np.nan
+    return r_, s_
+
+
 def load_maps(mouse, session, condition):
     if condition == 'control':
         folder = os.path.join(CONTROL_ROOT, control_tag(mouse, session)) + '/'
@@ -84,24 +141,42 @@ def load_maps(mouse, session, condition):
     D = [data['photostim']['stimDist'] * k, data['photostim2']['stimDist'] * k]
     with h5py.File(ps_file(folder, 'photostim'), 'r') as f:
         xy = np.column_stack([np.ravel(f['centroidX'][:]), np.ravel(f['centroidY'][:])]) * k
-    halves = []                                   # [map][half] -> cells x groups
+    halves, sigmas = [], []                       # [map][half] -> cells x groups
     for pi, pkey in enumerate(['photostim', 'photostim2']):
-        r, s, _ = repeat_responses(ps_file(folder, pkey), mouse, dt, D[pi])
-        sd = np.nanstd(r, axis=1, keepdims=True)
-        sd[~(sd > 0)] = np.nan
-        r = np.clip(r / sd, -CLIP_SD, CLIP_SD)
+        if PS_DEF == 'paper':
+            r, s = repeat_responses_paper(ps_file(folder, pkey), dt, D[pi])
+        else:
+            r, s, _ = repeat_responses(ps_file(folder, pkey), mouse, dt, D[pi])
+            sd = np.nanstd(r, axis=1, keepdims=True)
+            sd[~(sd > 0)] = np.nan
+            r = np.clip(r / sd, -CLIP_SD, CLIP_SD)
         n_groups = D[pi].shape[1]
         H = np.full((2, r.shape[0], n_groups), np.nan)
+        SG = np.full((r.shape[0], n_groups), np.nan)
         for g in range(n_groups):
             idx = np.where(s == g)[0]
+            Rall = r[:, idx]
+            nall = np.sum(np.isfinite(Rall), axis=1)
+            okall = nall >= MIN_REPEATS
+            if okall.any():
+                SG[okall, g] = np.nanstd(Rall[okall], axis=1, ddof=1)
             for h in range(2):
                 R = r[:, idx[h::2]]
                 n = np.sum(np.isfinite(R), axis=1)
                 ok = n >= MIN_HALF_REPEATS
                 if ok.any():
                     H[h, ok, g] = np.nanmean(R[ok], axis=1)
+        SG[~(SG > 0)] = np.nan
         halves.append(H)
-    return AMP, D, halves, xy
+        sigmas.append(SG)
+    if PS_DEF == 'paper':
+        # W~ per half and map; dW~ with the paper's pooled sigma
+        dW = [(halves[1][h] - halves[0][h]) / np.sqrt(sigmas[0] ** 2 + sigmas[1] ** 2)
+              for h in range(2)]
+        halves = [np.stack([halves[m][h] / sigmas[m] for h in range(2)]) for m in range(2)]
+    else:
+        dW = None
+    return AMP, D, halves, xy, dW
 
 
 #%% ============================================================================
@@ -126,7 +201,7 @@ def rel_cov(u, v):
 
 
 def session_splithalf(mouse, session, condition):
-    AMP, D, H, xy = load_maps(mouse, session, condition)
+    AMP, D, H, xy, dW_paper = load_maps(mouse, session, condition)
     n_cells, n_groups = D[0].shape
     amp_avg = (AMP[0] + AMP[1]) / 2
     amp_avg[np.minimum(D[0], D[1]) < NONTARG_FIT[0]] = np.nan
@@ -148,6 +223,9 @@ def session_splithalf(mouse, session, condition):
             M[:, g] = False
     for X in [H[0][0], H[0][1], H[1][0], H[1][1]]:
         M &= np.isfinite(X)
+    if dW_paper is not None:
+        for X in dW_paper:
+            M &= np.isfinite(X)
     # keep cells / groups with enough entries for stable row / column effects
     for _ in range(3):
         M &= (M.sum(axis=1) >= 5)[:, None]
@@ -157,7 +235,7 @@ def session_splithalf(mouse, session, condition):
     rows, cols = M.any(axis=1), M.any(axis=0)
 
     # ---- direct-response control ----
-    dWh = [H[1][h] - H[0][h] for h in range(2)]
+    dWh = dW_paper if dW_paper is not None else [H[1][h] - H[0][h] for h in range(2)]
     dT = [np.nan_to_num(d) for d in dWh]          # target entries of dW = direct change
     dcc = np.sqrt(((xy[:, None, :] - xy[None, :, :]) ** 2).sum(axis=2))
     dWdc = []
@@ -254,7 +332,7 @@ for condition, sessions in [('control', CONTROL_SESSIONS), ('learning', LEARNING
             print(f"  FAILED: {e}")
             traceback.print_exc()
 
-np.save(os.path.join(RESULTS_DIR, 'splithalf_dw_control_vs_learning.npy'), all_results,
+np.save(os.path.join(RESULTS_DIR, f'splithalf_dw_control_vs_learning_{PS_DEF}.npy'), all_results,
         allow_pickle=True)
 print("Saved.")
 
@@ -326,7 +404,7 @@ axes[0].set_ylabel('reliable dW variance / reliable W variance')
 fig.suptitle('Split-half reliable connectivity change, all mice pooled (bars: pooled mean ± SE; '
              'dots: sessions)', fontweight='bold')
 plt.tight_layout()
-plt.savefig(os.path.join(RESULTS_DIR, 'fig_splithalf_dw_control_vs_learning.png'), dpi=150,
+plt.savefig(os.path.join(RESULTS_DIR, f'fig_splithalf_dw_control_vs_learning_{PS_DEF}.png'), dpi=150,
             bbox_inches='tight')
 plt.close(fig)
 print("Figure saved.")
