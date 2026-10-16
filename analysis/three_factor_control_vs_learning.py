@@ -121,6 +121,12 @@ if DW_DEF == 'paper':
     TAG += '_psdef'
 PS_MIN_REPEATS = 10
 PS_TARGET_UM = 20
+# W0_COV=1 (DW_DEF='paper' only): regression-to-the-mean control. Before the
+# CV fit, each session's dW~ is residualised on the pair's baseline W~0
+# (= mu0/sigma0), W~0^2, and the group's summed target W~0 (first map).
+W0_COV = os.environ.get('W0_COV', '0') == '1'
+if W0_COV:
+    TAG += '_w0cov'
 if TEST_MAX is not None:
     TAG += f'_test{int(TEST_MAX)}'
 amp0_thr = 0.1
@@ -245,7 +251,7 @@ def paper_dW(folder, dt, stimDist_um):
         SD.append(sd)
     den = np.sqrt(SD[0] ** 2 + SD[1] ** 2)
     den[~(den > 0)] = np.nan
-    return (MU[1] - MU[0]) / den
+    return (MU[1] - MU[0]) / den, MU[0] / SD[0]
 
 
 def load_session(mouse, session, condition):
@@ -304,15 +310,15 @@ def load_session(mouse, session, condition):
         F_nan[np.isnan(F_nan)] = 0
         ts_pre = np.where((tsta > -PRE_EPOCH_SEC) & (tsta < 0))[0]
         epoch_act = np.nanmean(F_nan[ts_pre[0]:ts_pre[-1] + 1, :, :], axis=0)
-    dWp = paper_dW(folder, dt, stimDist) if DW_DEF == 'paper' else None
-    return AMP, stimDist, epoch_act, dWp
+    dWp, W0p = paper_dW(folder, dt, stimDist) if DW_DEF == 'paper' else (None, None)
+    return AMP, stimDist, epoch_act, dWp, W0p
 
 
 #%% ============================================================================
 # CELL 4: Per-session MLR fit (as in three_factor_variance_explained.py)
 # ============================================================================
 def session_fit(mouse, session, condition):
-    AMP, stimDist, epoch_act, dWp = load_session(mouse, session, condition)
+    AMP, stimDist, epoch_act, dWp, W0p = load_session(mouse, session, condition)
     if AMP[0].shape != AMP[1].shape:
         raise RuntimeError(f'before/after maps differ {AMP[0].shape} vs {AMP[1].shape}')
     n_neurons, trl = epoch_act.shape
@@ -331,6 +337,7 @@ def session_fit(mouse, session, condition):
 
     # ---- Pair selection (E->E) ----
     dw_list, pair_cl_list, pair_nt_list, dist_list = [], [], [], []
+    w0_list, tw0_list = [], []
     for gi in range(stimDist.shape[1]):
         cl = np.where((stimDist[:, gi] < dist_target_lt) &
                       (AMP[0][:, gi] > amp0_thr) & (AMP[1][:, gi] > amp1_thr))[0]
@@ -348,11 +355,21 @@ def session_fit(mouse, session, condition):
         pair_cl_list.append(cl)
         pair_nt_list.append(nontarg)
         dist_list.append(stimDist[nontarg, gi])
+        if W0p is not None:
+            w0_list.append(W0p[nontarg, gi])
+            tw0_list.append(np.full(nontarg.size, np.nansum(W0p[cl, gi])))
     n_groups = len(dw_list)
     if n_groups == 0:
         raise RuntimeError('no valid pairs')
 
     Y = np.nan_to_num(np.concatenate(dw_list), nan=0.0)
+    r_y_w0 = np.nan
+    if W0_COV and W0p is not None:
+        w0 = np.nan_to_num(np.concatenate(w0_list))
+        tw0 = np.concatenate(tw0_list)
+        r_y_w0 = float(np.corrcoef(Y, w0)[0, 1])
+        A = np.column_stack([np.ones_like(w0), w0, w0 ** 2, tw0])
+        Y = Y - A @ np.linalg.lstsq(A, Y, rcond=None)[0]
     all_nt = np.concatenate(pair_nt_list)
     pair_dist = np.concatenate(dist_list)
     n_pairs = len(Y)
@@ -405,7 +422,7 @@ def session_fit(mouse, session, condition):
         Y_pred_all.append(pred_te)
     return {
         'mouse': mouse, 'session': session, 'condition': condition,
-        'n_groups': n_groups, 'n_pairs': n_pairs, 'n_trials': trl, 'n_windows': n_wins,
+        'n_groups': n_groups, 'n_pairs': n_pairs, 'n_trials': trl, 'n_windows': n_wins, 'r_y_w0': r_y_w0,
         'r_test': np.mean(r_te_f), 'r_train': np.mean(r_tr_f),
         'p_test': np.exp(np.mean(np.log(np.clip(p_te_f, 1e-300, 1.0)))),
         'Y_test_all': np.concatenate(Y_test_all),
@@ -430,7 +447,7 @@ for condition, sessions in [(c, s) for c, s in [('control', CONTROL_SESSIONS),
             all_results.append(r)
             sig = '*' if r['p_test'] < 0.05 else ''
             print(f"  {r['n_groups']} groups, {r['n_pairs']} pairs, {r['n_trials']} trials, "
-                  f"{r['n_windows']} wins | train r={r['r_train']:.3f}, "
+                  f"{r['n_windows']} wins | r(dW,W0)={r['r_y_w0']:+.3f} | train r={r['r_train']:.3f}, "
                   f"test r={r['r_test']:.3f}, p={r['p_test']:.4f} {sig}")
         except FileNotFoundError:
             print("  Skipping -- file not found.")
