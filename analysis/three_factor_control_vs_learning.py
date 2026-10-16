@@ -142,6 +142,11 @@ PS_TARGET_UM = 20
 #   pre / post : only windows lying entirely in spont_pre / spont_post
 #   beta  : full-model window weights (mean over folds) + window epoch labels
 DIAG = os.environ.get('DIAG', '0') == '1'
+# MAG=1: store unnormalised per-pair quantities under result['mag'] for
+# magnitude comparisons: dW (raw dW, before any z-scoring), cc_mean (mean
+# coactivity per pseudo-trial), cc_pre / cc_post (same, spont_pre / spont_post
+# pseudo-trials only), plus session IDs for pooling
+MAG = os.environ.get('MAG', '0') == '1'
 LAST_N_PRE = [None]
 # W0_COV=1 (DW_DEF='paper' only): regression-to-the-mean control. Before the
 # CV fit, each session's dW~ is residualised on the pair's baseline W~0
@@ -386,6 +391,7 @@ def session_fit(mouse, session, condition):
         raise RuntimeError('no valid pairs')
 
     Y = np.nan_to_num(np.concatenate(dw_list), nan=0.0)
+    Y_raw = Y.copy()
     r_y_w0 = np.nan
     if W0_COV and W0p is not None:
         w0 = np.nan_to_num(np.concatenate(w0_list))
@@ -407,6 +413,13 @@ def session_fit(mouse, session, condition):
     r_pre = cl_weights @ epoch_act
     r_post_dev = epoch_act[all_nt, :] - bl_mean[all_nt, np.newaxis]
     cc_trial = r_pre * r_post_dev
+    mag = None
+    if MAG:
+        n_pre = LAST_N_PRE[0]
+        mag = dict(dw=Y_raw.astype(np.float32), cc_mean=cc_trial.mean(axis=1).astype(np.float32))
+        if n_pre is not None and 0 < n_pre < trl:
+            mag['cc_pre'] = cc_trial[:, :n_pre].mean(axis=1).astype(np.float32)
+            mag['cc_post'] = cc_trial[:, n_pre:].mean(axis=1).astype(np.float32)
 
     win_starts = np.arange(0, trl - WIN_SIZE + 1, WIN_STEP)
     n_wins = len(win_starts)
@@ -491,6 +504,7 @@ def session_fit(mouse, session, condition):
         'Y_test_all': np.concatenate(Y_test_all),
         'Y_pred_all': np.concatenate(Y_pred_all),
         'dist_test_all': np.concatenate(dist_test_all),
+        'mag': mag,
     }
 
 
