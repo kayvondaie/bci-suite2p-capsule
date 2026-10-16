@@ -113,6 +113,14 @@ def cap_epoch(Fs, fs, which):
     return Fs[:, -n:] if which == 0 else Fs[:, :n]
 if SPONT_MAX_MIN is not None:
     TAG += f'_spont{SPONT_MAX_MIN:g}min'
+# DW_DEF='paper': dW = paper-1 Delta PS response, (mu1 - mu0) / sqrt(sd0^2 + sd1^2)
+# from per-repeat Fstim responses (300 ms after / 200 ms before the stim,
+# >= 10 repeats, previous-target repeats skipped). Default 'amp': AMP1 - AMP0.
+DW_DEF = os.environ.get('DW_DEF', 'amp')
+if DW_DEF == 'paper':
+    TAG += '_psdef'
+PS_MIN_REPEATS = 10
+PS_TARGET_UM = 20
 if TEST_MAX is not None:
     TAG += f'_test{int(TEST_MAX)}'
 amp0_thr = 0.1
@@ -169,6 +177,77 @@ def load_learning_spont(folder):
     raise FileNotFoundError(f'no suite2p spont folder in {folder}')
 
 
+def ps_file(folder, pkey):
+    files = sorted(glob.glob(folder + 'data_photostim*.h5'))
+    if pkey == 'photostim':
+        files = [f for f in files if not os.path.basename(f).startswith('data_photostim2')]
+    else:
+        files = [f for f in files if os.path.basename(f).startswith('data_photostim2')]
+    if not files:
+        raise FileNotFoundError(f'{pkey} h5 in {folder}')
+    return files[0]
+
+
+def repeat_responses_paper(path, dt, stimDist_um):
+    """Per-repeat responses (cells x repeats), paper-1 windows."""
+    with h5py.File(path, 'r') as f:
+        favg_raw = f['favg_raw'][:]
+        seq = np.asarray(f['seq'][:]).astype(int).ravel() - 1
+        art = np.nanmean(np.nanmean(favg_raw, axis=2), axis=1)
+        art = art - np.nanmean(art[0:4])
+        art = np.where(art > 0.5)[0]
+        art = art[art < 40]
+        if art.size == 0:
+            raise RuntimeError(f'no stim artifact in {os.path.basename(path)}')
+        n_after = max(1, int(round(0.3 / dt)))
+        n_before = max(1, int(round(0.2 / dt)))
+        pre = (max(0, int(art[0] - 2 - n_before)), int(art[0] - 2))
+        post = (int(art[-1] + 2), int(art[-1] + 2 + n_after))
+        win = f['Fstim'][pre[0]:post[1], :, :]
+    resp = (np.nanmean(win[post[0] - pre[0]:], axis=0) - np.nanmean(win[:pre[1] - pre[0]], axis=0))
+    n_groups = stimDist_um.shape[1]
+    nearest = np.argmin(stimDist_um, axis=0)
+    best, best_sr = -np.inf, (seq, resp)
+    for off in range(-10, 11):
+        if off > 0:
+            s_, r_ = seq[:-off], resp[:, off:]
+        elif off < 0:
+            s_, r_ = seq[-off:], resp[:, :off]
+        else:
+            s_, r_ = seq, resp
+        n = min(len(s_), r_.shape[1])
+        s_, r_ = s_[:n], r_[:, :n]
+        v = np.nanmean([np.nanmean(r_[nearest[g], s_ == g]) for g in range(n_groups) if np.any(s_ == g)])
+        if v > best:
+            best, best_sr = v, (s_, r_)
+    s_, r_ = best_sr
+    r_ = r_.copy()
+    for t in range(1, len(s_)):
+        if 0 <= s_[t - 1] < n_groups:
+            r_[stimDist_um[:, s_[t - 1]] < PS_TARGET_UM, t] = np.nan
+    return r_, s_
+
+
+def paper_dW(folder, dt, stimDist_um):
+    """Paper-1 Delta PS response, cells x groups (NaN where < 10 repeats)."""
+    MU, SD = [], []
+    for pkey in ['photostim', 'photostim2']:
+        r, s_ = repeat_responses_paper(ps_file(folder, pkey), dt, stimDist_um)
+        mu = np.full(stimDist_um.shape, np.nan)
+        sd = np.full(stimDist_um.shape, np.nan)
+        for g in range(stimDist_um.shape[1]):
+            R = r[:, s_ == g]
+            ok = np.sum(np.isfinite(R), axis=1) >= PS_MIN_REPEATS
+            if ok.any():
+                mu[ok, g] = np.nanmean(R[ok], axis=1)
+                sd[ok, g] = np.nanstd(R[ok], axis=1, ddof=1)
+        MU.append(mu)
+        SD.append(sd)
+    den = np.sqrt(SD[0] ** 2 + SD[1] ** 2)
+    den[~(den > 0)] = np.nan
+    return (MU[1] - MU[0]) / den
+
+
 def load_session(mouse, session, condition):
     """AMP, stimDist and per-(pseudo)trial pre-epoch activity (cells x trials)."""
     if condition == 'control':
@@ -182,6 +261,7 @@ def load_session(mouse, session, condition):
         sh = np.load(folder + 'suite2p_photostim_single/plane0/siHeader.npy',
                      allow_pickle=True).item()
         fs = float(sh['metadata']['hRoiManager']['scanFrameRate'])
+        dt = 1.0 / fs
         bins = []
         with h5py.File(glob.glob(folder + 'data_main_*.h5')[0], 'r') as f:
             for ei, k in enumerate(['spont_pre', 'spont_post']):
@@ -195,6 +275,7 @@ def load_session(mouse, session, condition):
         data = ddct.load_hdf5(folder, ['dt_si'], ['stimDist', 'favg_raw'])
         AMP, stimDist = compute_amp_from_photostim(mouse, data, folder)
         fs = 1.0 / float(data['dt_si'])
+        dt = 1.0 / fs
         bins = []
         for ei, Fs in enumerate(load_learning_spont(folder)):
             Fs = cap_epoch(Fs, fs, ei)
@@ -206,6 +287,7 @@ def load_session(mouse, session, condition):
         folder = learning_folder(mouse, session)
         data = ddct.load_hdf5(folder, ['df_closedloop', 'dt_si'], ['stimDist', 'favg_raw'])
         AMP, stimDist = compute_amp_from_photostim(mouse, data, folder)
+        dt = float(data['dt_si'])
         epoch_act = np.nan_to_num(
             bin_pseudo_trials(np.asarray(data['df_closedloop'], dtype=float),
                               1.0 / float(data['dt_si'])), nan=0.0)
@@ -214,6 +296,7 @@ def load_session(mouse, session, condition):
         data = ddct.load_hdf5(folder, ['F', 'dt_si'], ['stimDist', 'favg_raw'])
         AMP, stimDist = compute_amp_from_photostim(mouse, data, folder)
         dt_si = data['dt_si']
+        dt = float(dt_si)
         F = data['F']                                      # frames x cells x trials
         tsta = np.arange(0, 12, dt_si)
         tsta = tsta - tsta[int(2 / dt_si)]
@@ -221,14 +304,15 @@ def load_session(mouse, session, condition):
         F_nan[np.isnan(F_nan)] = 0
         ts_pre = np.where((tsta > -PRE_EPOCH_SEC) & (tsta < 0))[0]
         epoch_act = np.nanmean(F_nan[ts_pre[0]:ts_pre[-1] + 1, :, :], axis=0)
-    return AMP, stimDist, epoch_act
+    dWp = paper_dW(folder, dt, stimDist) if DW_DEF == 'paper' else None
+    return AMP, stimDist, epoch_act, dWp
 
 
 #%% ============================================================================
 # CELL 4: Per-session MLR fit (as in three_factor_variance_explained.py)
 # ============================================================================
 def session_fit(mouse, session, condition):
-    AMP, stimDist, epoch_act = load_session(mouse, session, condition)
+    AMP, stimDist, epoch_act, dWp = load_session(mouse, session, condition)
     if AMP[0].shape != AMP[1].shape:
         raise RuntimeError(f'before/after maps differ {AMP[0].shape} vs {AMP[1].shape}')
     n_neurons, trl = epoch_act.shape
@@ -255,10 +339,12 @@ def session_fit(mouse, session, condition):
         if cl.size == 0:
             continue
         nontarg = np.where((stimDist[:, gi] > dist_nontarg_min) &
-                           (stimDist[:, gi] < dist_nontarg_max) & is_E)[0]
+                           (stimDist[:, gi] < dist_nontarg_max) & is_E &
+                           (np.isfinite(dWp[:, gi]) if dWp is not None else True))[0]
         if nontarg.size == 0:
             continue
-        dw_list.append(AMP[1][nontarg, gi] - AMP[0][nontarg, gi])
+        dw_list.append(dWp[nontarg, gi] if dWp is not None
+                       else AMP[1][nontarg, gi] - AMP[0][nontarg, gi])
         pair_cl_list.append(cl)
         pair_nt_list.append(nontarg)
         dist_list.append(stimDist[nontarg, gi])
