@@ -36,7 +36,7 @@ ss_c, xc, yc = pooled('control')
 r_c, p_c = sps.pearsonr(xc, yc)
 print(f"control        : {len(ss_c):2d} sess, {len(xc):6d} pairs, pooled r={r_c:+.4f} p={p_c:.3g}, "
       f"sessions p<.05 & r>0: {sum(r['p_test'] < 0.05 and r['r_test'] > 0 for r in ss_c)}/{len(ss_c)}")
-for lv in ['learning', 'learning_pseudo']:
+for lv in ['learning', 'learning_pseudo', 'learning_spont']:
     ss_l, xl, yl = pooled(lv)
     if not ss_l:
         continue

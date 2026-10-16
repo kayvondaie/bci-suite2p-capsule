@@ -7,6 +7,10 @@
 #   learning: pre-epoch (-10..0 s before trial start) activity from trial F
 #   control : no trials; spont_pre + spont_post (dF/F) cut into consecutive
 #             10 s pseudo-trials, each standing in for one trial's pre epoch
+#   learning_spont: learning sessions' own spont_pre + spont_post (suite2p
+#             spont folders, iscell cells, 10th-percentile F0), cut into 10 s
+#             pseudo-trials exactly like the controls -> activity matched to
+#             the water sessions; only what happened in between differs
 #   learning_pseudo: learning sessions run through the control procedure
 #             (continuous BCI-epoch df_closedloop cut into 10 s pseudo-trials),
 #             so control vs learning can be compared with identical activity
@@ -130,6 +134,26 @@ def bin_pseudo_trials(dff, fs):
     return np.nanmean(dff, axis=2)
 
 
+SPONT_FOLDER_PAIRS = [('suite2p_spont_pre', 'suite2p_spont_post'),
+                      ('suite2p_spont', 'suite2p_spont2')]
+
+
+def load_learning_spont(folder):
+    """Raw F of the learning session's spont epochs (pre, post order), cells
+    selected with each folder's iscell as in the data dict."""
+    for pair in SPONT_FOLDER_PAIRS:
+        dirs = [os.path.join(folder, n, 'plane0') for n in pair]
+        found = [p for p in dirs if os.path.exists(os.path.join(p, 'F.npy'))]
+        if found:
+            out = []
+            for p in found:
+                F = np.load(os.path.join(p, 'F.npy'), allow_pickle=True)
+                iscell = np.load(os.path.join(p, 'iscell.npy'), allow_pickle=True)
+                out.append(np.asarray(F[np.asarray(iscell)[:, 0] == 1], dtype=float))
+            return out
+    raise FileNotFoundError(f'no suite2p spont folder in {folder}')
+
+
 def load_session(mouse, session, condition):
     """AMP, stimDist and per-(pseudo)trial pre-epoch activity (cells x trials)."""
     if condition == 'control':
@@ -150,6 +174,17 @@ def load_session(mouse, session, condition):
                 F0 = np.nanpercentile(Fs, 10, axis=1, keepdims=True)
                 F0[F0 <= 0] = np.nan
                 bins.append(bin_pseudo_trials((Fs - F0) / F0, fs))
+        epoch_act = np.nan_to_num(np.concatenate(bins, axis=1), nan=0.0)
+    elif condition == 'learning_spont':
+        folder = learning_folder(mouse, session)
+        data = ddct.load_hdf5(folder, ['dt_si'], ['stimDist', 'favg_raw'])
+        AMP, stimDist = compute_amp_from_photostim(mouse, data, folder)
+        fs = 1.0 / float(data['dt_si'])
+        bins = []
+        for Fs in load_learning_spont(folder):
+            F0 = np.nanpercentile(Fs, 10, axis=1, keepdims=True)
+            F0[F0 <= 0] = np.nan
+            bins.append(bin_pseudo_trials((Fs - F0) / F0, fs))
         epoch_act = np.nan_to_num(np.concatenate(bins, axis=1), nan=0.0)
     elif condition == 'learning_pseudo':
         folder = learning_folder(mouse, session)
@@ -199,7 +234,9 @@ def session_fit(mouse, session, condition):
     for gi in range(stimDist.shape[1]):
         cl = np.where((stimDist[:, gi] < dist_target_lt) &
                       (AMP[0][:, gi] > amp0_thr) & (AMP[1][:, gi] > amp1_thr))[0]
-        if cl.size == 0 or np.any(is_outlier[cl]):
+        # outliers carry no opsin: never real targets, but keep the group
+        cl = cl[~is_outlier[cl]]
+        if cl.size == 0:
             continue
         nontarg = np.where((stimDist[:, gi] > dist_nontarg_min) &
                            (stimDist[:, gi] < dist_nontarg_max) & is_E)[0]
@@ -279,7 +316,8 @@ all_results = []
 RUN_CONDITIONS = os.environ.get('CONDITIONS', 'control,learning,learning_pseudo').split(',')
 for condition, sessions in [(c, s) for c, s in [('control', CONTROL_SESSIONS),
                                                 ('learning', LEARNING_SESSIONS),
-                                                ('learning_pseudo', LEARNING_SESSIONS)]
+                                                ('learning_pseudo', LEARNING_SESSIONS),
+                                                ('learning_spont', LEARNING_SESSIONS)]
                             if c in RUN_CONDITIONS]:
     for mouse, session in sessions:
         if (mouse, session) in EXCLUDE:
@@ -339,7 +377,8 @@ def one_sample_p(v):
 
 
 LEARNING_VARIANTS = {k: v for k, v in {'learning': 'Learning (BCI trials)',
-                                        'learning_pseudo': 'Learning (BCI pseudo-trials)'}.items()
+                                        'learning_pseudo': 'Learning (BCI pseudo-trials)',
+                                        'learning_spont': 'Learning (spont pseudo-trials)'}.items()
                      if k in RUN_CONDITIONS}
 stats = {}
 for lv in LEARNING_VARIANTS:

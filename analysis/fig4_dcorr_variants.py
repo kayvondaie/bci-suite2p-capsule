@@ -14,7 +14,11 @@
 #   trial_slope   trial-aligned F, OLS slope of C over 10-trial windows (step 5)
 #   signal_halves correlation of the trial-averaged response (per half)
 #   noise_halves  correlation of residuals around the trial average (per half)
+#   prepost       spont_post vs spont_pre (water controls and learning_spont)
 # cont_* also exist for water controls (spont); trial_* are learning only.
+# learning_spont: learning sessions with their own spont_pre / spont_post
+# (suite2p spont folders, iscell cells, 10th-percentile F0) -> 'prepost' with
+# activity matched to the water sessions; only what happened in between differs.
 # Each pair variant gives two regressors:
 #   paper : sum_j (C1_ij W~1_j - C0_ij W~0_j)       (paper-1 definition)
 #   dC    : sum_j (C1_ij - C0_ij) (W~0_j + W~1_j)/2 (correlation change only)
@@ -37,7 +41,41 @@ N_BLOCKS = 8
 TRIAL_WIN = 10
 TRIAL_STEP = 5
 VARIANTS = ['cont_halves', 'cont_slope', 'trial_halves', 'trial_first40',
-            'trial_slope', 'signal_halves', 'noise_halves']
+            'trial_slope', 'signal_halves', 'noise_halves', 'prepost']
+SPONT_FOLDER_PAIRS = [('suite2p_spont_pre', 'suite2p_spont_post'),
+                      ('suite2p_spont', 'suite2p_spont2')]
+
+
+def spont_epochs(mouse, session, condition):
+    """dF/F (10th-percentile F0) of the spont epochs before / after, and fs."""
+    if condition == 'control':
+        folder = os.path.join(CONTROL_ROOT, control_tag(mouse, session)) + '/'
+        sh = np.load(folder + 'suite2p_photostim_single/plane0/siHeader.npy',
+                     allow_pickle=True).item()
+        fs = float(sh['metadata']['hRoiManager']['scanFrameRate'])
+        with h5py.File(glob.glob(folder + 'data_main_*.h5')[0], 'r') as f:
+            raw = [np.asarray(f[k][:], dtype=float) for k in ['spont_pre', 'spont_post']]
+    else:
+        folder = learning_folder(mouse, session)
+        fs = 1.0 / float(ddct.load_hdf5(folder, ['dt_si'], [])['dt_si'])
+        raw = None
+        for pair in SPONT_FOLDER_PAIRS:
+            dirs = [os.path.join(folder, n, 'plane0') for n in pair]
+            if all(os.path.exists(os.path.join(d, 'F.npy')) for d in dirs):
+                raw = []
+                for d in dirs:
+                    F = np.load(os.path.join(d, 'F.npy'), allow_pickle=True)
+                    isc = np.load(os.path.join(d, 'iscell.npy'), allow_pickle=True)
+                    raw.append(np.asarray(F[np.asarray(isc)[:, 0] == 1], dtype=float))
+                break
+        if raw is None:
+            raise FileNotFoundError(f'no spont pre/post pair in {folder}')
+    out = []
+    for Fs in raw:
+        F0 = np.nanpercentile(Fs, 10, axis=1, keepdims=True)
+        F0[F0 <= 0] = np.nan
+        out.append(np.nan_to_num((Fs - F0) / F0, nan=0.0))
+    return out, fs
 
 #%% ============================================================================
 # CELL 2: Correlation helpers
@@ -119,13 +157,22 @@ def zs(v):
 
 
 def session_fit(mouse, session, condition):
-    S = load_session(mouse, session, condition)
+    S = load_session(mouse, session, 'learning' if condition == 'learning_spont' else condition)
     F = None
     if condition == 'learning':
         folder = learning_folder(mouse, session)
         F = np.asarray(ddct.load_hdf5(folder, ['F'], [])['F'], dtype=float)
-    CV = correlation_variants(S['segs'], F)
+    CV = correlation_variants(S['segs'], F) if condition != 'learning_spont' else {}
     del F, S['segs']
+    if condition in ('control', 'learning_spont'):
+        eps, fs = spont_epochs(mouse, session, condition)
+        if eps[0].shape[0] != S['MU'][0].shape[0]:
+            raise RuntimeError(f"spont has {eps[0].shape[0]} cells, photostim {S['MU'][0].shape[0]}")
+        CV['prepost'] = ('pair', corr_matrix(segments(eps[0], fs)),
+                         corr_matrix(segments(eps[1], fs)))
+        spont_min = [e.shape[1] / fs / 60 for e in eps]
+    else:
+        spont_min = None
 
     AMP, D, MU, SD = S['AMP'], S['D'], S['MU'], S['SD']
     Wt = [MU[0] / SD[0], MU[1] / SD[1]]
@@ -143,11 +190,9 @@ def session_fit(mouse, session, condition):
     rows = {k: [] for k in keys}
     y_list, c_list, n_used = [], [], 0
     for g in range(n_groups):
-        tg = np.where((D[0][:, g] < TARGET_UM) & (D[1][:, g] < TARGET_UM))[0]
+        # outliers carry no opsin: never targets, but keep the group
+        tg = np.where((D[0][:, g] < TARGET_UM) & (D[1][:, g] < TARGET_UM) & ~is_out)[0]
         if tg.size == 0:
-            continue
-        resp_t = tg[(AMP[0][tg, g] > amp_thr) & (AMP[1][tg, g] > amp_thr)]
-        if np.any(is_out[resp_t]):
             continue
         nt = np.where((D[0][:, g] > NONTARG_UM[0]) & (D[0][:, g] < NONTARG_UM[1]) &
                       (D[1][:, g] > NONTARG_UM[0]) & (D[1][:, g] < NONTARG_UM[1]) &
@@ -157,7 +202,7 @@ def session_fit(mouse, session, condition):
         w0 = np.nan_to_num(Wt[0][tg, g])
         w1 = np.nan_to_num(Wt[1][tg, g])
         wbar = (w0 + w1) / 2
-        tg3 = np.where((D[0][:, g] < 10) & (D[1][:, g] < 10) &
+        tg3 = np.where((D[0][:, g] < 10) & (D[1][:, g] < 10) & ~is_out &
                        (AMP[0][:, g] > amp_thr) & (AMP[1][:, g] > amp_thr))[0]
         y_list.append(dWt[nt, g])
         c_list.append(np.full(nt.size, np.nansum(dWt[tg, g])))
@@ -177,7 +222,7 @@ def session_fit(mouse, session, condition):
         raise RuntimeError('no valid groups')
     y_raw, c_raw = np.concatenate(y_list), np.concatenate(c_list)
     y, c = zs(y_raw), zs(c_raw)
-    res = dict(mouse=mouse, session=session, condition=condition, n_groups=n_used,
+    res = dict(mouse=mouse, session=session, condition=condition, n_groups=n_used, spont_min=spont_min,
                n_pairs=len(y), fits={}, joint={}, raw={})
     for k in keys:
         x_raw = np.concatenate(rows[k])
@@ -205,7 +250,8 @@ def _suff(y, A):
 
 
 all_results = []
-for condition, sessions in [('learning', LEARNING_SESSIONS), ('control', CONTROL_SESSIONS)]:
+for condition, sessions in [('learning', LEARNING_SESSIONS), ('control', CONTROL_SESSIONS),
+                            ('learning_spont', LEARNING_SESSIONS)]:
     for mouse, session in sessions:
         if (mouse, session) in EXCLUDE:
             continue
@@ -213,7 +259,7 @@ for condition, sessions in [('learning', LEARNING_SESSIONS), ('control', CONTROL
         try:
             r = session_fit(mouse, session, condition)
             all_results.append(r)
-            print(f"  {r['n_groups']} groups, {r['n_pairs']} pairs")
+            print(f"  {r['n_groups']} groups, {r['n_pairs']} pairs, spont min: {r['spont_min']}")
             for (v, form), f in r['fits'].items():
                 print(f"    {v:14s} {form:5s} beta={f['beta']:+.4f} p={f['p']:.3g}")
         except FileNotFoundError as e:
@@ -274,7 +320,7 @@ summary = {}
 print("\n================ POOLED dW ~ dA + target dW ================")
 for mg, mice in MOUSE_GROUPS.items():
     print(f"\n### {mg}")
-    for cond in ['learning', 'control']:
+    for cond in ['learning', 'learning_spont', 'control']:
         sess = [r for r in qc if r['condition'] == cond and r['mouse'] in mice]
         keys = sorted({k for r in sess for k in r['fits']},
                       key=lambda k: (VARIANTS.index(k[0]), k[1] != 'paper'))
@@ -290,7 +336,7 @@ for mg, mice in MOUSE_GROUPS.items():
 print("\n================ JOINT dW ~ dC + CdW + target dW (pooled) ================")
 for mg, mice in MOUSE_GROUPS.items():
     print(f"\n### {mg}")
-    for cond in ['learning', 'control']:
+    for cond in ['learning', 'learning_spont', 'control']:
         sess = [r for r in qc if r['condition'] == cond and r['mouse'] in mice]
         for v in VARIANTS:
             ss = [r for r in sess if v in r.get('joint', {})]
@@ -312,14 +358,16 @@ for mg, mice in MOUSE_GROUPS.items():
 
 print("\n================ learning - control, single-regressor fits (pooled) ================")
 for mg, mice in MOUSE_GROUPS.items():
-    for k in [(v, f) for v in ['cont_halves', 'cont_slope'] for f in ['paper', 'dC', 'CdW', 'dCu']]:
-        sl = [r['fits'][k]['suff'] for r in qc if r['condition'] == 'learning'
-              and r['mouse'] in mice and k in r['fits']]
-        sc = [r['fits'][k]['suff'] for r in qc if r['condition'] == 'control'
-              and r['mouse'] in mice and k in r['fits']]
-        if sl and sc:
-            d, p = pooled_diff_p(sc, sl)
-            print(f"  {mg:13s} {k[0]:12s} {k[1]:5s} learning - control = {d:+.4f}, p={p:.2g}")
+    for lv, vs in [('learning', ['cont_halves', 'cont_slope']), ('learning_spont', ['prepost'])]:
+        for k in [(v, f) for v in vs for f in ['paper', 'dC', 'CdW', 'dCu']]:
+            sl = [r['fits'][k]['suff'] for r in qc if r['condition'] == lv
+                  and r['mouse'] in mice and k in r['fits']]
+            sc = [r['fits'][k]['suff'] for r in qc if r['condition'] == 'control'
+                  and r['mouse'] in mice and k in r['fits']]
+            if sl and sc:
+                d, p = pooled_diff_p(sc, sl)
+                print(f"  {mg:13s} {k[0]:12s} {k[1]:5s} {lv} - control = {d:+.4f}, p={p:.2g} "
+                      f"({len(sl)} vs {len(sc)} sess)")
 
 #%% ============================================================================
 # CELL 5: Figure — pooled beta per variant
@@ -329,13 +377,14 @@ for ax, mg in zip(axes, MOUSE_GROUPS):
     labels, xi = [], 0
     for v in VARIANTS:
         for form in ['paper', 'dC', 'CdW', 'dCu']:
-            for cond, color, dx in [('learning', '#e74c3c', -0.15), ('control', '#3498db', 0.15)]:
+            for cond, color, dx in [('learning', '#e74c3c', -0.2), ('learning_spont', '#eda100', 0.0),
+                                    ('control', '#3498db', 0.2)]:
                 s = summary.get((mg, cond, (v, form)))
                 if s is None:
                     continue
                 ax.errorbar(xi + dx, s['beta'], yerr=1.96 * s['se'], fmt='o', color=color,
                             capsize=3, mfc=color if s['p'] < 0.05 else 'white')
-            if any((mg, c, (v, form)) in summary for c in ['learning', 'control']):
+            if any((mg, c, (v, form)) in summary for c in ['learning', 'learning_spont', 'control']):
                 labels.append(f'{v}\n{form}')
                 xi += 1
     ax.axhline(0, color='k', alpha=0.3)

@@ -12,7 +12,7 @@ out = {}
 tag = os.environ.get('TAG', '')
 res = np.load(f'/root/capsule/results/three_factor_control_vs_learning{tag}.npy', allow_pickle=True)
 print(f'file tag: {tag or "(none)"}')
-for cond in ['control', 'learning', 'learning_pseudo']:
+for cond in ['control', 'learning', 'learning_pseudo', 'learning_spont']:
     ss = [r for r in res if r['condition'] == cond and r['n_groups'] >= MIN_GROUPS]
     if not ss:
         continue
