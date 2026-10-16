@@ -30,7 +30,7 @@ import h5py
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.stats import pearsonr, wilcoxon
-from sklearn.model_selection import KFold
+from sklearn.model_selection import GroupKFold, KFold
 import data_dict_create_module_test as ddct
 from BCI_data_helpers import compute_amp_from_photostim
 
@@ -121,6 +121,14 @@ if DW_DEF == 'paper':
     TAG += '_psdef'
 PS_MIN_REPEATS = 10
 PS_TARGET_UM = 20
+# DIAG=1: extra fits per session, stored under result['diag']:
+#   group : same model, CV folds split by photostim group (no group shared
+#           between train and test)
+#   sum   : one regressor, total coactivity over all windows (Hebbian slope)
+#   pre / post : only windows lying entirely in spont_pre / spont_post
+#   beta  : full-model window weights (mean over folds) + window epoch labels
+DIAG = os.environ.get('DIAG', '0') == '1'
+LAST_N_PRE = [None]
 # W0_COV=1 (DW_DEF='paper' only): regression-to-the-mean control. Before the
 # CV fit, each session's dW~ is residualised on the pair's baseline W~0
 # (= mu0/sigma0), W~0^2, and the group's summed target W~0 (first map).
@@ -255,6 +263,7 @@ def paper_dW(folder, dt, stimDist_um):
 
 
 def load_session(mouse, session, condition):
+    LAST_N_PRE[0] = None
     """AMP, stimDist and per-(pseudo)trial pre-epoch activity (cells x trials)."""
     if condition == 'control':
         folder = os.path.join(CONTROL_ROOT, control_tag(mouse, session)) + '/'
@@ -276,6 +285,7 @@ def load_session(mouse, session, condition):
                 F0[F0 <= 0] = np.nan
                 bins.append(bin_pseudo_trials((Fs - F0) / F0, fs))
         epoch_act = np.nan_to_num(np.concatenate(bins, axis=1), nan=0.0)
+        LAST_N_PRE[0] = bins[0].shape[1]
     elif condition == 'learning_spont':
         folder = learning_folder(mouse, session)
         data = ddct.load_hdf5(folder, ['dt_si'], ['stimDist', 'favg_raw'])
@@ -289,6 +299,7 @@ def load_session(mouse, session, condition):
             F0[F0 <= 0] = np.nan
             bins.append(bin_pseudo_trials((Fs - F0) / F0, fs))
         epoch_act = np.nan_to_num(np.concatenate(bins, axis=1), nan=0.0)
+        LAST_N_PRE[0] = bins[0].shape[1]
     elif condition == 'learning_pseudo':
         folder = learning_folder(mouse, session)
         data = ddct.load_hdf5(folder, ['df_closedloop', 'dt_si'], ['stimDist', 'favg_raw'])
@@ -338,6 +349,7 @@ def session_fit(mouse, session, condition):
     # ---- Pair selection (E->E) ----
     dw_list, pair_cl_list, pair_nt_list, dist_list = [], [], [], []
     w0_list, tw0_list = [], []
+    grp_list = []
     for gi in range(stimDist.shape[1]):
         cl = np.where((stimDist[:, gi] < dist_target_lt) &
                       (AMP[0][:, gi] > amp0_thr) & (AMP[1][:, gi] > amp1_thr))[0]
@@ -355,6 +367,7 @@ def session_fit(mouse, session, condition):
         pair_cl_list.append(cl)
         pair_nt_list.append(nontarg)
         dist_list.append(stimDist[nontarg, gi])
+        grp_list.append(np.full(nontarg.size, gi))
         if W0p is not None:
             w0_list.append(W0p[nontarg, gi])
             tw0_list.append(np.full(nontarg.size, np.nansum(W0p[cl, gi])))
@@ -400,6 +413,7 @@ def session_fit(mouse, session, condition):
     cv = KFold(n_splits=n_cv_folds, shuffle=True, random_state=42)
     r_te_f, r_tr_f, p_te_f = [], [], []
     Y_test_all, Y_pred_all = [], []
+    beta_folds = []
     for train_idx, test_idx in cv.split(X):
         Y_tr, Y_te = Y[train_idx], Y[test_idx]
         mu_y, sig_y = Y_tr.mean(), Y_tr.std()
@@ -420,7 +434,39 @@ def session_fit(mouse, session, condition):
         p_te_f.append(p)
         Y_test_all.append((Y_te - mu_y) / sig_y)
         Y_pred_all.append(pred_te)
+        beta_folds.append(beta)
+    diag = None
+    if DIAG:
+        groups = np.concatenate(grp_list)
+        n_pre = LAST_N_PRE[0]
+        win_epoch = (np.array(['pre' if ws + WIN_SIZE <= n_pre else
+                               ('post' if ws >= n_pre else 'mixed') for ws in win_starts])
+                     if n_pre is not None else np.array(['all'] * n_wins))
+
+        def cv_variant(Xv, splitter, grp=None):
+            yt, yp = [], []
+            for tr, te in (splitter.split(Xv, groups=grp) if grp is not None else splitter.split(Xv)):
+                mu, sg = Y[tr].mean(), Y[tr].std()
+                sg = sg if sg > 0 else 1.0
+                b = np.linalg.pinv(Xv[tr]) @ ((Y[tr] - mu) / sg)
+                yt.append((Y[te] - mu) / sg)
+                yp.append(Xv[te] @ b)
+            return dict(Y_test=np.concatenate(yt), Y_pred=np.concatenate(yp))
+
+        diag = {'win_epoch': win_epoch, 'beta': np.mean(beta_folds, axis=0)}
+        if len(np.unique(groups)) >= n_cv_folds:
+            diag['group'] = cv_variant(X, GroupKFold(n_splits=n_cv_folds), groups)
+        xs = X.sum(axis=1, keepdims=True)
+        xs = (xs - xs.mean()) / (xs.std() if xs.std() > 0 else 1.0)
+        diag['sum'] = cv_variant(xs, cv)
+        ys = (Y - Y.mean()) / (Y.std() if Y.std() > 0 else 1.0)
+        diag['sum_slope'] = float(np.mean(xs[:, 0] * ys))   # = Pearson r, all pairs
+        for ep in ['pre', 'post']:
+            cols = np.where(win_epoch == ep)[0]
+            if cols.size:
+                diag[ep] = cv_variant(X[:, cols], cv)
     return {
+        'diag': diag,
         'mouse': mouse, 'session': session, 'condition': condition,
         'n_groups': n_groups, 'n_pairs': n_pairs, 'n_trials': trl, 'n_windows': n_wins, 'r_y_w0': r_y_w0,
         'r_test': np.mean(r_te_f), 'r_train': np.mean(r_tr_f),
