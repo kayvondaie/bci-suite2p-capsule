@@ -123,10 +123,12 @@ def session_splithalf(mouse, session, condition):
 
     dmin, dmax = np.minimum(D[0], D[1]), np.maximum(D[0], D[1])
     M = (dmin > NONTARG_FIT[0]) & (dmax < NONTARG_FIT[1]) & ~is_out[:, None]
+    # Outliers carry no opsin, so they are never real targets: they are left
+    # out of the responsive-target set, but their presence does not drop a group
     for g in range(n_groups):
         resp_t = np.where((D[0][:, g] < 10) & (D[1][:, g] < 10) &
-                          (AMP[0][:, g] > amp_thr) & (AMP[1][:, g] > amp_thr))[0]
-        if resp_t.size == 0 or np.any(is_out[resp_t]):
+                          (AMP[0][:, g] > amp_thr) & (AMP[1][:, g] > amp_thr) & ~is_out)[0]
+        if resp_t.size == 0:
             M[:, g] = False
     for X in [H[0][0], H[0][1], H[1][0], H[1][1]]:
         M &= np.isfinite(X)
@@ -195,6 +197,8 @@ for condition, sessions in [('control', CONTROL_SESSIONS), ('learning', LEARNING
                       f"dW/W={q['ratio']:+.3f}")
             if 'r_pair' in r:
                 print(f"    split-half r, pair-specific: dW={r['r_pair']:+.3f}  W={r['r_pair_W']:+.3f}")
+            if 'r_pair_W_close' in r:
+                print(f"    split-half r, pair-specific W < {NONTARG_CLOSE} um: {r['r_pair_W_close']:+.3f}")
         except FileNotFoundError as e:
             print(f"  Skipping -- file not found ({e}).")
         except Exception as e:
