@@ -479,7 +479,8 @@ def session_fit(mouse, session, condition):
                 yp.append(Xv[te] @ b)
             return dict(Y_test=np.concatenate(yt), Y_pred=np.concatenate(yp))
 
-        diag = {'win_epoch': win_epoch, 'beta': np.mean(beta_folds, axis=0)}
+        diag = {'win_epoch': win_epoch, 'beta': np.mean(beta_folds, axis=0),
+                'win_starts': win_starts, 'n_pre': n_pre, 'win_size': WIN_SIZE}
         if len(np.unique(groups)) >= n_cv_folds:
             diag['group'] = cv_variant(X, GroupKFold(n_splits=n_cv_folds), groups)
         xs = X.sum(axis=1, keepdims=True)
