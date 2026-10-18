@@ -227,6 +227,8 @@ for si, (mouse, sess) in enumerate(LEARNING_SESSIONS):
 
 out = {}
 for ind, S in pool.items():
+    if not S:
+        continue
     cat = {k: np.concatenate([s[k] for s in S]) for k in S[0]}
     print(f'\n######## {ind} ({len(S)} sessions), correlation epoch {CORR_EP}')
     for m in range(2):
