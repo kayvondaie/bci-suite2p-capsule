@@ -144,9 +144,10 @@ def cv_r2(X, y, groups):
     return 1 - np.sum((y - yp) ** 2) / np.sum((y - y.mean()) ** 2)
 
 
+MICE = os.environ.get('MICE', '').split(',') if os.environ.get('MICE') else None
 results = []
 for mouse, session in LEARNING_SESSIONS:
-    if (mouse, session) in EXCLUDE:
+    if (mouse, session) in EXCLUDE or (MICE is not None and mouse not in MICE):
         continue
     try:
         T = session_table(mouse, session)
