@@ -97,6 +97,30 @@ def deconv(act, fs, mouse):
 
 
 FEATS = ['corr_pair', 'corr_spec', 'corr_tgt', 'corr_nt', 'nt_bright', 'nt_noise', 'tgt_amp', 'tgt_bright']
+# NEU=1: neuropil contamination indices of the non-target (spont_pre suite2p
+# F / Fneu, iscell cells): neu_corr = corr(F, Fneu); neu_ratio = mean Fneu /
+# mean F; neu_resid = corr(F - 0.7 Fneu, Fneu); plus tgt_neu_corr (mean
+# neu_corr of g's targets)
+NEU = os.environ.get('NEU', '0') == '1'
+NEU_FEATS = ['neu_corr', 'neu_ratio', 'neu_resid', 'tgt_neu_corr']
+if NEU:
+    FEATS = FEATS + NEU_FEATS
+
+
+def neu_indices(folder):
+    for pair in SPONT_FOLDER_PAIRS:
+        d = os.path.join(folder, pair[0], 'plane0')
+        if os.path.exists(os.path.join(d, 'Fneu.npy')):
+            F = np.load(os.path.join(d, 'F.npy'), allow_pickle=True)
+            N = np.load(os.path.join(d, 'Fneu.npy'), allow_pickle=True)
+            ic = np.asarray(np.load(os.path.join(d, 'iscell.npy'), allow_pickle=True))[:, 0] == 1
+            F = np.asarray(F[ic], float); N = np.asarray(N[ic], float)
+            def rowcorr(a, b):
+                a = a - a.mean(1, keepdims=True); b = b - b.mean(1, keepdims=True)
+                return (a * b).sum(1) / np.sqrt((a ** 2).sum(1) * (b ** 2).sum(1))
+            return dict(neu_corr=rowcorr(F, N), neu_ratio=N.mean(1) / np.where(F.mean(1) > 0, F.mean(1), np.nan),
+                        neu_resid=rowcorr(F - 0.7 * N, N))
+    raise FileNotFoundError(f'no spont Fneu in {folder}')
 
 
 def table(mouse, sess):
@@ -121,6 +145,9 @@ def table(mouse, sess):
     C = corr_mat(bin_frames(act, nb))
     np.fill_diagonal(C, np.nan)
     cell_hub = np.nanmean(C, axis=1)
+    NI = neu_indices(folder) if NEU else None
+    if NI is not None and len(NI['neu_corr']) != n_cells:
+        raise RuntimeError('Fneu cell count mismatch')
     amp_avg = (AMP[0] + AMP[1]) / 2
     amp_avg[D < 30] = np.nan
     mnt = np.nanmean(amp_avg, axis=1)
@@ -158,6 +185,10 @@ def table(mouse, sess):
         rows['nt_bright'] += list(bright[nt]); rows['nt_noise'] += list(noise[nt])
         rows['tgt_bright'] += [float(np.mean(bright[cl]))] * nt.size
         rows['tgt_amp'] += [np.nan] * nt.size
+        if NI is not None:
+            for k in ['neu_corr', 'neu_ratio', 'neu_resid']:
+                rows[k] += list(NI[k][nt])
+            rows['tgt_neu_corr'] += [float(np.nanmean(NI['neu_corr'][cl]))] * nt.size
     T = {k: np.asarray(v, dtype=float) for k, v in rows.items()}
     ok = np.isfinite(T['p0']) & np.isfinite(T['p1'])
     T = {k: v[ok] for k, v in T.items()}
@@ -199,6 +230,15 @@ for ind, S in pool.items():
             if res:
                 out[f'{ind}/W{m}/{k}'] = res
                 print(f'   {k:11s} r={res["r"]:+.3f} p={res["p"]:.2g}  sig+ {res["n_sig"]}/{res["n_sess"]}')
+        if NEU:
+            base = [k for k in FEATS if k not in ['corr_pair'] + NEU_FEATS]
+            Xb = np.column_stack([F[k] for k in base])
+            okb = np.isfinite(Xb).all(axis=1) & np.isfinite(y) & np.isfinite(np.column_stack([F[k] for k in NEU_FEATS])).all(axis=1)
+            Xbs = (Xb[okb] - Xb[okb].mean(0)) / Xb[okb].std(0); ybs = (y[okb] - y[okb].mean()) / y[okb].std()
+            bb = np.linalg.lstsq(np.column_stack([np.ones(okb.sum()), Xbs]), ybs, rcond=None)[0]
+            print('   joint OLS WITHOUT neuropil features (same pairs): ' +
+                  ', '.join(f'{k} {bb[j + 1]:+.3f}' for j, k in enumerate(base)))
+            out[f'{ind}/W{m}/ols_noneu'] = {k: float(bb[j + 1]) for j, k in enumerate(base)}
         X = np.column_stack([F[k] for k in FEATS if k != 'corr_pair'])
         ok = np.isfinite(X).all(axis=1) & np.isfinite(y)
         Xs = (X[ok] - X[ok].mean(0)) / X[ok].std(0); ys = (y[ok] - y[ok].mean()) / y[ok].std()
@@ -214,6 +254,15 @@ for ind, S in pool.items():
             pv = 2 * sps.t.sf(abs(beta[j + 1] / se[j + 1]), ok.sum() - A.shape[1])
             out[f'{ind}/W{m}/ols'][k] = (float(beta[j + 1]), float(pv))
             print(f'     {k:11s} {beta[j + 1]:+.3f}  p={pv:.2g}')
+        if m == 0 and NEU:
+            print('   neuropil indices vs hub-ness / brightness (pairs):')
+            for k in NEU_FEATS:
+                for k2 in ['corr_nt', 'corr_tgt', 'nt_bright', 'nt_noise', 'corr_spec']:
+                    okk = np.isfinite(F[k]) & np.isfinite(F[k2])
+                    rr = np.corrcoef(F[k][okk], F[k2][okk])[0, 1]
+                    out[f'{ind}/neucorr/{k}/{k2}'] = float(rr)
+                print('     ' + k + ': ' + ', '.join(f"{k2} {out[f'{ind}/neucorr/{k}/{k2}']:+.2f}"
+                                                for k2 in ['corr_nt', 'corr_tgt', 'nt_bright', 'nt_noise', 'corr_spec']))
         if m == 0:
             print('   feature correlations with corr_pair:')
             for k in FEATS[1:]:
@@ -221,6 +270,6 @@ for ind, S in pool.items():
                 rr = np.corrcoef(F[k][okk], F['corr_pair'][okk])[0, 1]
                 out[f'{ind}/fcorr/{k}'] = float(rr)
                 print(f'     corr_pair~{k:11s} r={rr:+.3f}')
-with open(f'/root/capsule/results/robust_neg_decomp_{CORR_EP}.json', 'w') as fo:
+with open(f'/root/capsule/results/robust_neg_decomp_{CORR_EP}' + ('_neu' if NEU else '') + ('_dc' if DECONV else '') + '.json', 'w') as fo:
     json.dump(out, fo)
 print('DONE')
