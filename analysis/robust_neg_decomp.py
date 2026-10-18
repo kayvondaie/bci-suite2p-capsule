@@ -30,12 +30,46 @@ TAU6 = float(os.environ.get('TAU6', 1.25))
 TAU8 = float(os.environ.get('TAU8', 0.125))
 _DC_CACHE = {}
 try:
-    from suite2p.extraction import dcnv as _dcnv
+    from numba import njit
     DC_METHOD = 'oasis'
 except Exception:
-    _dcnv = None
+    njit = None
     DC_METHOD = 'ar1'
 print(f'deconvolution: {DECONV}, method {DC_METHOD}, tau6 {TAU6}, tau8 {TAU8}')
+
+if njit is not None:
+    @njit
+    def _oasis_trace(F, v, w, t, l, s, tau, fs):
+        # AR(1) OASIS, as suite2p.extraction.dcnv.oasis_trace
+        NT = F.shape[0]
+        g = -1. / (tau * fs)
+        it = 0
+        ip = 0
+        while it < NT:
+            v[ip], w[ip], t[ip], l[ip] = F[it], 1, it, 1
+            while ip > 0:
+                if v[ip - 1] * np.exp(g * l[ip - 1]) > v[ip]:
+                    f1 = np.exp(g * l[ip - 1])
+                    f2 = np.exp(2 * g * l[ip - 1])
+                    wnew = w[ip - 1] + w[ip] * f2
+                    v[ip - 1] = (v[ip - 1] * w[ip - 1] + v[ip] * w[ip] * f1) / wnew
+                    w[ip - 1] = wnew
+                    l[ip - 1] = l[ip - 1] + l[ip]
+                    ip -= 1
+                else:
+                    break
+            it += 1
+            ip += 1
+        s[t[1:ip]] = v[1:ip] - v[:ip - 1] * np.exp(g * l[:ip - 1])
+
+
+def _maximin(x, fs):
+    from scipy.ndimage import gaussian_filter1d, minimum_filter1d, maximum_filter1d
+    win = max(3, int(60.0 * fs))
+    lo = gaussian_filter1d(x, 10.0, axis=1)
+    lo = minimum_filter1d(lo, win, axis=1)
+    lo = maximum_filter1d(lo, win, axis=1)
+    return x - lo
 
 
 def deconv(act, fs, mouse):
@@ -43,15 +77,20 @@ def deconv(act, fs, mouse):
     if key in _DC_CACHE:
         return _DC_CACHE[key]
     tau = TAU6 if mouse == 'BCI103' else TAU8
-    x = np.asarray(act, dtype=np.float32)
-    if _dcnv is not None:
-        xb = _dcnv.preprocess(F=x.copy(), baseline='maximin', win_baseline=60.0, sig_baseline=10.0,
-                              fs=fs, prctile_baseline=8)
-        sp = _dcnv.oasis(F=xb, batch_size=3000, tau=tau, fs=fs)
+    x = np.asarray(act, dtype=np.float64)
+    if njit is not None:
+        xb = _maximin(x, fs)
+        sp = np.zeros_like(xb)
+        T = xb.shape[1]
+        for n in range(xb.shape[0]):
+            v = np.zeros(T); w = np.zeros(T); t = np.zeros(T, np.int64); l = np.zeros(T)
+            s_ = np.zeros(T)
+            _oasis_trace(xb[n], v, w, t, l, s_, tau, fs)
+            sp[n] = s_
     else:
         g = np.exp(-1.0 / (tau * fs))
         sp = np.clip(x[:, 1:] - g * x[:, :-1], 0, None)
-        sp = np.concatenate([np.zeros((x.shape[0], 1), np.float32), sp], axis=1)
+        sp = np.concatenate([np.zeros((x.shape[0], 1)), sp], axis=1)
     _DC_CACHE.clear()
     _DC_CACHE[key] = sp
     return sp
