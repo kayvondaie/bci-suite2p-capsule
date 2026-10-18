@@ -13,6 +13,14 @@ with open(_SRC) as _f:
 exec(_code[:_code.index('FEATS = [')])
 
 P_SEL = float(os.environ.get('P_SEL', 0.01))
+# MATCH_SPONT=1: cap spont_pre (last part) and spont_post (first part) at the
+# shorter of the two, per session
+MATCH_SPONT = os.environ.get('MATCH_SPONT', '0') == '1'
+# DIST_RESID=1: within the selected connections (pooled per indicator), W and
+# each correlation are residualised on distance bins before binning
+DIST_RESID = os.environ.get('DIST_RESID', '0') == '1'
+RD_EDGES = [30, 35, 40, 45, 50, 60, 75, 100, 150, 200, 300, 500, 1000]
+DUR = []
 EPOCHS = ['spont_pre', 'bci', 'spont_post']
 
 
@@ -26,6 +34,10 @@ def sess_table(mouse, sess):
     acts = {'bci': np.nan_to_num(np.asarray(data['df_closedloop'], dtype=float))}
     try:
         sp = load_learning_spont(folder)
+        DUR.append((mouse, sess, *[F.shape[1] / fs / 60 for F in sp]))
+        if MATCH_SPONT and len(sp) == 2:
+            nmin = min(sp[0].shape[1], sp[1].shape[1])
+            sp = [sp[0][:, -nmin:], sp[1][:, :nmin]]
         for n, F in zip(['spont_pre', 'spont_post'], sp):
             acts[n] = np.nan_to_num(spont_dff(F))
     except FileNotFoundError:
@@ -102,11 +114,22 @@ for ind, S in pool.items():
     for m in range(2):
         for mode, s_ in [('cross', sel[1 - m]), ('same', sel[m])]:
             for k in EPOCHS:
-                res = meanbin(cat[k][s_], cat[f'W{m}'][s_], cat['sid'][s_])
+                xk, yk = cat[k][s_], cat[f'W{m}'][s_]
+                if DIST_RESID:
+                    db = np.clip(np.digitize(cat['dist'][s_], RD_EDGES[1:-1]), 0, len(RD_EDGES) - 2)
+                    X = np.eye(len(RD_EDGES) - 1)[db]
+                    ok = np.isfinite(xk) & np.isfinite(yk)
+                    for arr in (xk, yk):
+                        arr[ok] = arr[ok] - X[ok] @ np.linalg.lstsq(X[ok], arr[ok], rcond=None)[0]
+                res = meanbin(xk, yk, cat['sid'][s_])
                 if res:
                     out[f'{ind}/W{m}/{mode}/{k}'] = res
                     print(f"{ind} W{m} sel={mode:5s} {k:10s} r={res['r']:+.3f} p={res['p']:.2g} n={res['n']} "
                           f"sig+ {res['n_sig']}/{res['n_sess']}")
-with open('/root/capsule/results/robust_prepost.json', 'w') as fo:
+print('spont durations (min): mouse session pre post')
+for d_ in DUR:
+    print('   ' + ' '.join(str(v) if isinstance(v, str) else f'{v:.1f}' for v in d_))
+TAGS = ('_match' if MATCH_SPONT else '') + ('_dres' if DIST_RESID else '')
+with open(f'/root/capsule/results/robust_prepost{TAGS}.json', 'w') as fo:
     json.dump(out, fo)
 print('DONE')
