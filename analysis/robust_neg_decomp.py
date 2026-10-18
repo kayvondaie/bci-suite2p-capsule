@@ -23,6 +23,40 @@ exec(_code[:_code.index("pool = {'s6'")])
 
 P_SEL = float(os.environ.get('P_SEL', 0.001))
 CORR_EP = os.environ.get('CORR_EP', 'bci')
+# DECONV=1: deconvolve the activity used for correlations (OASIS from suite2p,
+# AR(1) inverse filter as fallback); decay tau TAU6 (BCI103, GCaMP6s) or TAU8
+DECONV = os.environ.get('DECONV', '0') == '1'
+TAU6 = float(os.environ.get('TAU6', 1.25))
+TAU8 = float(os.environ.get('TAU8', 0.125))
+_DC_CACHE = {}
+try:
+    from suite2p.extraction import dcnv as _dcnv
+    DC_METHOD = 'oasis'
+except Exception:
+    _dcnv = None
+    DC_METHOD = 'ar1'
+print(f'deconvolution: {DECONV}, method {DC_METHOD}, tau6 {TAU6}, tau8 {TAU8}')
+
+
+def deconv(act, fs, mouse):
+    key = (mouse, act.shape, float(np.sum(act[:, :200])))
+    if key in _DC_CACHE:
+        return _DC_CACHE[key]
+    tau = TAU6 if mouse == 'BCI103' else TAU8
+    x = np.asarray(act, dtype=np.float32)
+    if _dcnv is not None:
+        xb = _dcnv.preprocess(F=x.copy(), baseline='maximin', win_baseline=60.0, sig_baseline=10.0,
+                              fs=fs, prctile_baseline=8)
+        sp = _dcnv.oasis(F=xb, batch_size=3000, tau=tau, fs=fs)
+    else:
+        g = np.exp(-1.0 / (tau * fs))
+        sp = np.clip(x[:, 1:] - g * x[:, :-1], 0, None)
+        sp = np.concatenate([np.zeros((x.shape[0], 1), np.float32), sp], axis=1)
+    _DC_CACHE.clear()
+    _DC_CACHE[key] = sp
+    return sp
+
+
 FEATS = ['corr_pair', 'corr_spec', 'corr_tgt', 'corr_nt', 'nt_bright', 'nt_noise', 'tgt_amp', 'tgt_bright']
 
 
@@ -43,6 +77,8 @@ def table(mouse, sess):
         act = np.nan_to_num(np.asarray(data['df_closedloop'], dtype=float))
     else:
         act = np.nan_to_num(spont_dff(raw))
+    if DECONV:
+        act = deconv(act, fs, mouse)
     C = corr_mat(bin_frames(act, nb))
     np.fill_diagonal(C, np.nan)
     cell_hub = np.nanmean(C, axis=1)
