@@ -97,6 +97,13 @@ def deconv(act, fs, mouse):
 
 
 FEATS = ['corr_pair', 'corr_spec', 'corr_tgt', 'corr_nt', 'nt_bright', 'nt_noise', 'tgt_amp', 'tgt_bright']
+# NEU_C: photostim responses from dF/F0 - NEU_C * dFneu/F0 (neuropil_reps.py)
+# instead of the data-dict Fstim (raw F, i.e. NEU_C = 0)
+NEU_C = float(os.environ['NEU_C']) if os.environ.get('NEU_C') else None
+if NEU_C is not None:
+    import sys as _sys
+    _sys.path.insert(0, os.path.dirname(os.path.abspath(_P if '_P' in globals() else __file__)))
+    from neuropil_reps import reps_neuropil
 # NEU=1: neuropil contamination indices of the non-target (spont_pre suite2p
 # F / Fneu, iscell cells): neu_corr = corr(F, Fneu); neu_ratio = mean Fneu /
 # mean F; neu_resid = corr(F - 0.7 Fneu, Fneu); plus tgt_neu_corr (mean
@@ -129,7 +136,10 @@ def table(mouse, sess):
     AMP, D = compute_amp_from_photostim(mouse, data, folder)
     dt = float(data['dt_si']); fs = 1.0 / dt; nb = max(1, int(round(fs)))
     n_cells, n_groups = D.shape
-    reps = [repeat_responses_paper(ps_file(folder, k), dt, D) for k in ['photostim', 'photostim2']]
+    if NEU_C is None:
+        reps = [repeat_responses_paper(ps_file(folder, k), dt, D) for k in ['photostim', 'photostim2']]
+    else:
+        reps = reps_neuropil(folder, D, dt, NEU_C, ps_file)
     raw = load_learning_spont(folder)[0]
     if raw.shape[0] != n_cells:
         raise RuntimeError('spont cell count mismatch')
@@ -203,7 +213,7 @@ def table(mouse, sess):
 
 pool = {'s6': [], 's8': []}
 for si, (mouse, sess) in enumerate(LEARNING_SESSIONS):
-    if (mouse, sess) in EXCLUDE:
+    if (mouse, sess) in EXCLUDE or (MICE is not None and mouse not in MICE):
         continue
     try:
         T = table(mouse, sess)
@@ -224,7 +234,8 @@ for ind, S in pool.items():
         y = cat[f'W{m}'][s_]
         F = {k: (cat[f'tgt_amp{m}'] if k == 'tgt_amp' else cat[k])[s_] for k in FEATS}
         sid = cat['sid'][s_]
-        print(f' W{m} (selected in map {1 - m}), n={s_.sum()}')
+        n_rob = int(np.sum((cat['p0'] < 0.01) & (cat['p1'] < 0.01) & (cat['t0'] > 0) & (cat['t1'] > 0)))
+        print(f' W{m} (selected in map {1 - m}), n={s_.sum()}  [robust both maps p<0.01: {n_rob}]')
         for k in FEATS:
             res = meanbin(F[k], y, sid)
             if res:
@@ -270,6 +281,6 @@ for ind, S in pool.items():
                 rr = np.corrcoef(F[k][okk], F['corr_pair'][okk])[0, 1]
                 out[f'{ind}/fcorr/{k}'] = float(rr)
                 print(f'     corr_pair~{k:11s} r={rr:+.3f}')
-with open(f'/root/capsule/results/robust_neg_decomp_{CORR_EP}' + ('_neu' if NEU else '') + ('_dc' if DECONV else '') + '.json', 'w') as fo:
+with open(f'/root/capsule/results/robust_neg_decomp_{CORR_EP}' + ('_neu' if NEU else '') + ('_dc' if DECONV else '') + (f'_c{NEU_C:g}' if NEU_C is not None else '') + ('_' + '-'.join(MICE) if MICE else '') + '.json', 'w') as fo:
     json.dump(out, fo)
 print('DONE')
