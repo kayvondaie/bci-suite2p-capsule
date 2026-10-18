@@ -192,6 +192,7 @@ def activity_features(acts, F, dt):
     C['nc_bci'] = corr_mat(R)
     tsta = np.arange(0, 12, dt); tsta = tsta - tsta[int(2 / dt)]
     win = np.where((tsta > 0) & (tsta < 10))[0]
+    win = win[win < F.shape[0]]
     with np.errstate(all='ignore'):
         tm = np.nanmean(F[win], axis=0)                  # cells x trials
     tm = np.nan_to_num(tm - np.nanmean(tm, axis=1, keepdims=True))
