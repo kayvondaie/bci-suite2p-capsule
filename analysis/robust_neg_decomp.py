@@ -22,6 +22,9 @@ with open(_SRC) as _f:
 exec(_code[:_code.index("pool = {'s6'")])
 
 P_SEL = float(os.environ.get('P_SEL', 0.001))
+# SEL_SAME=1: each map's W is shown for pairs selected (p < P_SEL, positive) in
+# that same map; default selects in the other map
+SEL_SAME = os.environ.get('SEL_SAME', '0') == '1'
 CORR_EP = os.environ.get('CORR_EP', 'bci')
 # DECONV=1: deconvolve the activity used for correlations (OASIS from suite2p,
 # AR(1) inverse filter as fallback); decay tau TAU6 (BCI103, GCaMP6s) or TAU8
@@ -233,12 +236,13 @@ for ind, S in pool.items():
     cat = {k: np.concatenate([s[k] for s in S]) for k in S[0]}
     print(f'\n######## {ind} ({len(S)} sessions), correlation epoch {CORR_EP}')
     for m in range(2):
-        s_ = (cat[f'p{1 - m}'] < P_SEL) & (cat[f't{1 - m}'] > 0)
+        sm = m if SEL_SAME else 1 - m
+        s_ = (cat[f'p{sm}'] < P_SEL) & (cat[f't{sm}'] > 0)
         y = cat[f'W{m}'][s_]
         F = {k: (cat[f'tgt_amp{m}'] if k == 'tgt_amp' else cat[k])[s_] for k in FEATS}
         sid = cat['sid'][s_]
         n_rob = int(np.sum((cat['p0'] < 0.01) & (cat['p1'] < 0.01) & (cat['t0'] > 0) & (cat['t1'] > 0)))
-        print(f' W{m} (selected in map {1 - m}), n={s_.sum()}  [robust both maps p<0.01: {n_rob}]')
+        print(f' W{m} (selected in map {sm}), n={s_.sum()}  [robust both maps p<0.01: {n_rob}]')
         for k in FEATS:
             res = meanbin(F[k], y, sid)
             if res:
@@ -284,6 +288,6 @@ for ind, S in pool.items():
                 rr = np.corrcoef(F[k][okk], F['corr_pair'][okk])[0, 1]
                 out[f'{ind}/fcorr/{k}'] = float(rr)
                 print(f'     corr_pair~{k:11s} r={rr:+.3f}')
-with open(f'/root/capsule/results/robust_neg_decomp_{CORR_EP}' + ('_neu' if NEU else '') + ('_dc' if DECONV else '') + (f'_c{NEU_C:g}' if NEU_C is not None else '') + ('_' + '-'.join(MICE) if MICE else '') + '.json', 'w') as fo:
+with open(f'/root/capsule/results/robust_neg_decomp_{CORR_EP}' + ('_neu' if NEU else '') + ('_dc' if DECONV else '') + (f'_c{NEU_C:g}' if NEU_C is not None else '') + ('_same' if SEL_SAME else '') + f'_p{P_SEL:g}' + ('_' + '-'.join(MICE) if MICE else '') + '.json', 'w') as fo:
     json.dump(out, fo)
 print('DONE')
