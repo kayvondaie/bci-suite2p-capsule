@@ -25,6 +25,26 @@ P_SEL = float(os.environ.get('P_SEL', 0.001))
 # SEL_SAME=1: each map's W is shown for pairs selected (p < P_SEL, positive) in
 # that same map; default selects in the other map
 SEL_SAME = os.environ.get('SEL_SAME', '0') == '1'
+# GARBAGE=1 (default): drop cells (as targets and non-targets) whose raw F in
+# either photostim epoch is < 10% of the session median, or whose per-repeat
+# response SD is > median + 10 MAD in either map
+GARBAGE = os.environ.get('GARBAGE', '1') == '1'
+GARB_LOG = []
+
+
+def garbage_cells(folder, reps, n_cells):
+    bad = np.zeros(n_cells, bool)
+    for sub in ['suite2p_photostim_single', 'suite2p_photostim_single2']:
+        d = os.path.join(folder, sub, 'plane0')
+        ic = np.asarray(np.load(os.path.join(d, 'iscell.npy'), allow_pickle=True))[:, 0] == 1
+        mF = np.nanmean(np.asarray(np.load(os.path.join(d, 'F.npy'), allow_pickle=True)[ic], float), axis=1)
+        if mF.size == n_cells:
+            bad |= ~(mF > 0.1 * np.nanmedian(mF))
+    for r, _ in reps:
+        sd = np.nanstd(r, axis=1)
+        med = np.nanmedian(sd); mad = np.nanmedian(np.abs(sd - med))
+        bad |= ~(sd <= med + 10 * mad)
+    return bad
 CORR_EP = os.environ.get('CORR_EP', 'bci')
 # DECONV=1: deconvolve the activity used for correlations (OASIS from suite2p,
 # AR(1) inverse filter as fallback); decay tau TAU6 (BCI103, GCaMP6s) or TAU8
@@ -167,6 +187,9 @@ def table(mouse, sess):
     is_out = mnt > np.nanmean(mnt) + N_SD_OUTLIER * np.nanstd(mnt)
     if mouse not in PAN_NEURONAL_MICE:
         is_out[:] = False
+    bad = garbage_cells(folder, reps, n_cells) if GARBAGE else np.zeros(n_cells, bool)
+    GARB_LOG.append((mouse, sess, int(bad.sum()), n_cells))
+    is_out = is_out | bad
     NT = (D > dist_nontarg_min) & (D < dist_nontarg_max) & ~is_out[:, None]
     groups = []
     for g in range(n_groups):
@@ -242,7 +265,11 @@ for ind, S in pool.items():
         F = {k: (cat[f'tgt_amp{m}'] if k == 'tgt_amp' else cat[k])[s_] for k in FEATS}
         sid = cat['sid'][s_]
         n_rob = int(np.sum((cat['p0'] < 0.01) & (cat['p1'] < 0.01) & (cat['t0'] > 0) & (cat['t1'] > 0)))
-        print(f' W{m} (selected in map {sm}), n={s_.sum()}  [robust both maps p<0.01: {n_rob}]')
+        print(f' W{m} (selected in map {sm}), n={s_.sum()}  [robust both maps p<0.01: {n_rob}]  '
+              f'raw dF/F0 of selected: mean {np.nanmean(cat[f"mu{m}"][s_]):.3f}, median {np.nanmedian(cat[f"mu{m}"][s_]):.3f}; '
+              f'all pairs SD map0 {np.nanstd(cat["mu0"]):.3f} map1 {np.nanstd(cat["mu1"]):.3f}')
+        out[f'{ind}/W{m}/raw_sel'] = dict(mean=float(np.nanmean(cat[f'mu{m}'][s_])), median=float(np.nanmedian(cat[f'mu{m}'][s_])),
+                                         sd_all0=float(np.nanstd(cat['mu0'])), sd_all1=float(np.nanstd(cat['mu1'])))
         for k in FEATS:
             res = meanbin(F[k], y, sid)
             if res:
@@ -288,6 +315,10 @@ for ind, S in pool.items():
                 rr = np.corrcoef(F[k][okk], F['corr_pair'][okk])[0, 1]
                 out[f'{ind}/fcorr/{k}'] = float(rr)
                 print(f'     corr_pair~{k:11s} r={rr:+.3f}')
-with open(f'/root/capsule/results/robust_neg_decomp_{CORR_EP}' + ('_neu' if NEU else '') + ('_dc' if DECONV else '') + (f'_c{NEU_C:g}' if NEU_C is not None else '') + ('_same' if SEL_SAME else '') + f'_p{P_SEL:g}' + ('_' + '-'.join(MICE) if MICE else '') + '.json', 'w') as fo:
+with open(f'/root/capsule/results/robust_neg_decomp_{CORR_EP}' + ('_neu' if NEU else '') + ('_dc' if DECONV else '') + (f'_c{NEU_C:g}' if NEU_C is not None else '') + ('_same' if SEL_SAME else '') + ('' if GARBAGE else '_nogarb') + f'_p{P_SEL:g}' + ('_' + '-'.join(MICE) if MICE else '') + '.json', 'w') as fo:
     json.dump(out, fo)
+print('garbage cells removed (mouse session n_bad / n_cells):')
+for g_ in GARB_LOG:
+    print('   ', *g_)
+out['garbage'] = GARB_LOG
 print('DONE')
