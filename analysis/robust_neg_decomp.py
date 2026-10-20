@@ -31,6 +31,9 @@ SEL_SAME = os.environ.get('SEL_SAME', '0') == '1'
 # SD is > median + 10 MAD in either map (too aggressive for dim ribo cells)
 GARBAGE = os.environ.get('GARBAGE', '1') == '1'
 GARB_SD = os.environ.get('GARB_SD', '0') == '1'
+# always: drop cells whose per-repeat response SD exceeds SD_MULT x the session
+# median in either map (broken cells whose dF/F0 explodes on some repeats)
+SD_MULT = float(os.environ.get('SD_MULT', 10))
 GARB_LOG = []
 
 
@@ -42,10 +45,12 @@ def garbage_cells(folder, reps, n_cells):
         mF = np.nanmean(np.asarray(np.load(os.path.join(d, 'F.npy'), allow_pickle=True)[ic], float), axis=1)
         if mF.size == n_cells:
             bad |= ~(mF > 0.1 * np.nanmedian(mF))
-    for r, _ in (reps if GARB_SD else []):
+    for r, _ in reps:
         sd = np.nanstd(r, axis=1)
         med = np.nanmedian(sd); mad = np.nanmedian(np.abs(sd - med))
-        bad |= ~(sd <= med + 10 * mad)
+        if GARB_SD:
+            bad |= ~(sd <= med + 10 * mad)
+        bad |= ~(sd <= SD_MULT * med)
     return bad
 CORR_EP = os.environ.get('CORR_EP', 'bci')
 # DECONV=1: deconvolve the activity used for correlations (OASIS from suite2p,
