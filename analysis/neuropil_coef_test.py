@@ -172,7 +172,8 @@ def robust(T, c):
     return (T[f'p0_{c}'] < P_ROB) & (T[f'p1_{c}'] < P_ROB) & (T[f't0_{c}'] > 0) & (T[f't1_{c}'] > 0)
 
 
-pool = {'s6': [], 's8': []}
+GROUP = {'BCI103': 'cyto6', 'BCI105': 'cyto8'}   # others: ribo-GCaMP8s
+pool = {'ribo8': [], 'cyto8': [], 'cyto6': []}
 checks = []
 for mouse, sess in LEARNING_SESSIONS:
     if (mouse, sess) in EXCLUDE or (MICE is not None and mouse not in MICE):
@@ -181,7 +182,7 @@ for mouse, sess in LEARNING_SESSIONS:
         print(f'{mouse} {sess}', flush=True)
         T, ch = session(mouse, sess)
         checks.append((mouse, sess, ch))
-        pool['s6' if mouse == 'BCI103' else 's8'].append(T)
+        pool[GROUP.get(mouse, 'ribo8')].append(T)
     except Exception as e:
         print(f'{mouse} {sess}: skipped ({e})')
 

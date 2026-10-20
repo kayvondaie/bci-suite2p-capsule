@@ -211,7 +211,8 @@ def table(mouse, sess):
     return T
 
 
-pool = {'s6': [], 's8': []}
+GROUP = {'BCI103': 'cyto6', 'BCI105': 'cyto8'}   # others: ribo-GCaMP8s
+pool = {'ribo8': [], 'cyto8': [], 'cyto6': []}
 for si, (mouse, sess) in enumerate(LEARNING_SESSIONS):
     if (mouse, sess) in EXCLUDE or (MICE is not None and mouse not in MICE):
         continue
@@ -222,7 +223,7 @@ for si, (mouse, sess) in enumerate(LEARNING_SESSIONS):
     except Exception as e:
         print(f'{mouse} {sess}: {e}'); continue
     T['sid'] = np.full(len(T['g']), si, float)
-    pool['s6' if mouse == 'BCI103' else 's8'].append(T)
+    pool[GROUP.get(mouse, 'ribo8')].append(T)
     print(f'{mouse} {sess}: {len(T["g"])} pairs', flush=True)
 
 out = {}

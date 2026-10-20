@@ -100,7 +100,8 @@ def session(mouse, sess):
     return R, info
 
 
-pool = {'s6': [], 's8': []}
+GROUP = {'BCI103': 'cyto6', 'BCI105': 'cyto8'}   # others: ribo-GCaMP8s
+pool = {'ribo8': [], 'cyto8': [], 'cyto6': []}
 infos = []
 for mouse, sess in LEARNING_SESSIONS:
     if (mouse, sess) in EXCLUDE or (MICE is not None and mouse not in MICE):
@@ -110,7 +111,7 @@ for mouse, sess in LEARNING_SESSIONS:
     except Exception as e:
         print(f'{mouse} {sess}: skipped ({e})'); continue
     infos.append(info)
-    pool['s6' if mouse == 'BCI103' else 's8'].append(R)
+    pool[GROUP.get(mouse, 'ribo8')].append(R)
     print(f"{mouse} {sess}: {info['n_pairs']} pair-maps, median repeats/group {info['n_rep']:.0f}, "
           f"median repeat SD {info['sd']:.3f}, pi0 c0 {info['pi0_c0']:.3f} c0.7 {info['pi0_c07']:.3f}", flush=True)
 
