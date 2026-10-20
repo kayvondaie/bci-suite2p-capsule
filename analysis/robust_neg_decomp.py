@@ -26,9 +26,11 @@ P_SEL = float(os.environ.get('P_SEL', 0.001))
 # that same map; default selects in the other map
 SEL_SAME = os.environ.get('SEL_SAME', '0') == '1'
 # GARBAGE=1 (default): drop cells (as targets and non-targets) whose raw F in
-# either photostim epoch is < 10% of the session median, or whose per-repeat
-# response SD is > median + 10 MAD in either map
+# either photostim epoch is < 10% of the session median (in practice F <= 0;
+# their dF/F0 explodes). GARB_SD=1 also drops cells whose per-repeat response
+# SD is > median + 10 MAD in either map (too aggressive for dim ribo cells)
 GARBAGE = os.environ.get('GARBAGE', '1') == '1'
+GARB_SD = os.environ.get('GARB_SD', '0') == '1'
 GARB_LOG = []
 
 
@@ -40,7 +42,7 @@ def garbage_cells(folder, reps, n_cells):
         mF = np.nanmean(np.asarray(np.load(os.path.join(d, 'F.npy'), allow_pickle=True)[ic], float), axis=1)
         if mF.size == n_cells:
             bad |= ~(mF > 0.1 * np.nanmedian(mF))
-    for r, _ in reps:
+    for r, _ in (reps if GARB_SD else []):
         sd = np.nanstd(r, axis=1)
         med = np.nanmedian(sd); mad = np.nanmedian(np.abs(sd - med))
         bad |= ~(sd <= med + 10 * mad)
@@ -315,7 +317,7 @@ for ind, S in pool.items():
                 rr = np.corrcoef(F[k][okk], F['corr_pair'][okk])[0, 1]
                 out[f'{ind}/fcorr/{k}'] = float(rr)
                 print(f'     corr_pair~{k:11s} r={rr:+.3f}')
-with open(f'/root/capsule/results/robust_neg_decomp_{CORR_EP}' + ('_neu' if NEU else '') + ('_dc' if DECONV else '') + (f'_c{NEU_C:g}' if NEU_C is not None else '') + ('_same' if SEL_SAME else '') + ('' if GARBAGE else '_nogarb') + f'_p{P_SEL:g}' + ('_' + '-'.join(MICE) if MICE else '') + '.json', 'w') as fo:
+with open(f'/root/capsule/results/robust_neg_decomp_{CORR_EP}' + ('_neu' if NEU else '') + ('_dc' if DECONV else '') + (f'_c{NEU_C:g}' if NEU_C is not None else '') + ('_same' if SEL_SAME else '') + ('' if GARBAGE else '_nogarb') + ('_garbsd' if GARB_SD else '') + f'_p{P_SEL:g}' + ('_' + '-'.join(MICE) if MICE else '') + '.json', 'w') as fo:
     json.dump(out, fo)
 print('garbage cells removed (mouse session n_bad / n_cells):')
 for g_ in GARB_LOG:
